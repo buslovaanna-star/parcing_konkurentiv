@@ -1,0 +1,1 @@
+# parcing_konkurentiv
