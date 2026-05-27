@@ -1,0 +1,454 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import io, re
+from pathlib import Path
+from datetime import datetime
+
+st.set_page_config(page_title="ProcureAI", page_icon="🛒", layout="wide")
+
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Unbounded:wght@700;800&family=Inter:wght@400;500;600&display=swap');
+html,body,[class*="css"]{font-family:'Inter',sans-serif;}
+.app-header{background:linear-gradient(135deg,#080f1a 0%,#0d1e30 100%);border:1px solid #1a3045;border-radius:16px;padding:28px 36px;margin-bottom:20px;position:relative;overflow:hidden;}
+.app-header::after{content:'';position:absolute;top:-60px;right:-60px;width:220px;height:220px;border-radius:50%;background:radial-gradient(circle,#0ea5e915 0%,transparent 70%);}
+.app-header h1{font-family:'Unbounded',sans-serif;font-size:1.7rem;font-weight:800;color:#eef6ff;margin:0 0 4px 0;}
+.app-header p{color:#5b8aa8;font-size:.88rem;margin:0;}
+.badge{display:inline-block;background:#0ea5e912;color:#0ea5e9;border:1px solid #0ea5e928;border-radius:20px;padding:2px 10px;font-size:.7rem;font-family:'DM Mono',monospace;margin-right:6px;}
+.kpi-row{display:flex;gap:12px;flex-wrap:wrap;margin:16px 0;}
+.kpi{flex:1;min-width:140px;background:#080f1a;border:1px solid #1a3045;border-radius:12px;padding:14px 16px;position:relative;}
+.kpi::after{content:'';position:absolute;bottom:0;left:0;right:0;height:2px;border-radius:0 0 12px 12px;}
+.kpi.sky::after{background:#0ea5e9;}.kpi.grn::after{background:#22c55e;}.kpi.amb::after{background:#f59e0b;}.kpi.red::after{background:#ef4444;}.kpi.vio::after{background:#a855f7;}
+.kpi .l{color:#4d7a96;font-size:.68rem;font-weight:600;letter-spacing:.5px;text-transform:uppercase;margin-bottom:5px;}
+.kpi .v{color:#eef6ff;font-family:'Unbounded',sans-serif;font-size:1.55rem;font-weight:800;line-height:1.1;}
+.kpi .s{color:#2d5570;font-size:.7rem;font-family:'DM Mono',monospace;margin-top:2px;}
+.sup-row{display:flex;gap:12px;flex-wrap:wrap;margin:12px 0;}
+.sc{flex:1;min-width:180px;border-radius:12px;padding:16px 20px;border:1px solid;}
+.sc.ih{background:#04101a;border-color:#0ea5e925;}.sc.vw{background:#04100a;border-color:#22c55e25;}.sc.dsn{background:#100a04;border-color:#f59e0b25;}
+.sc .sn{font-size:.68rem;font-weight:700;letter-spacing:1px;text-transform:uppercase;font-family:'DM Mono',monospace;margin-bottom:5px;}
+.sc.ih .sn{color:#0ea5e9;}.sc.vw .sn{color:#22c55e;}.sc.dsn .sn{color:#f59e0b;}
+.sc .sv{color:#eef6ff;font-family:'Unbounded',sans-serif;font-size:1.3rem;font-weight:800;margin:4px 0 2px;}
+.sc .sd{color:#4d7a96;font-size:.75rem;}
+.sh{display:flex;align-items:center;gap:8px;border-bottom:1px solid #1a3045;padding-bottom:7px;margin:20px 0 12px;}
+.sh h3{color:#eef6ff;font-size:.92rem;font-weight:600;margin:0;}
+.dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;}
+section[data-testid="stSidebar"]>div{background:#050d16 !important;}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<div class="app-header">
+  <span class="badge">PROCURE</span><span class="badge">AI v3</span>
+  <h1>🛒 ProcureAI — Аналіз закупівель</h1>
+  <p>Сайт + Магазини → оптимальне замовлення з аналізом маржинальності</p>
+</div>""", unsafe_allow_html=True)
+
+# ── Sidebar ───────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("### ⚙️ Налаштування")
+    st.divider()
+    usd_rate = st.number_input("💱 Курс USD → UAH", 1.0, 200.0, 41.5, 0.5)
+    disp_cur = st.radio("🪙 Валюта", ["UAH","USD"])
+    cur      = "₴" if disp_cur=="UAH" else "$"
+    st.divider()
+    st.markdown("**📦 Замовлення**")
+    horizon   = st.slider("Горизонт закупівлі (днів)", 7, 90, 30, 7)
+    lead_time = st.slider("Lead time (днів)", 0, 60, 14, 1)
+    safety    = st.slider("Страховий запас (днів)", 0, 60, 30, 5)
+    total_days = horizon + lead_time + safety
+    st.caption(f"Покриття: **{total_days} днів**")
+    st.divider()
+    st.markdown("**📊 Фільтри продажів**")
+    sales_mode    = st.radio("Базовий період", ["Весь період","Останні N місяців"])
+    recent_months = st.number_input("N місяців", 1, 17, 3, 1) if sales_mode=="Останні N місяців" else None
+    min_rent      = st.slider("Ігнорувати продажі з рентабельністю нижче %", 0, 60, 30, 5,
+                              help="Акційні продажі не враховуються в потребі")
+    st.divider()
+    st.markdown("**💰 Маржинальність**")
+    margin_min = st.slider("Мінімальна маржа закупівлі %", 0, 80, 25, 5)
+    only_avail = st.checkbox("Тільки товари в наявності", True)
+    st.divider()
+    st.markdown("**🏆 ABC**")
+    abc_inc = st.multiselect("Включити категорії", ["A","B","C"], default=["A","B","C"])
+
+# ── Helpers ───────────────────────────────────────────────────────
+def cs(s):
+    return '' if pd.isna(s) else str(s).replace('\xa0',' ').strip()
+
+def to_num(v):
+    if pd.isna(v): return 0.0
+    s = str(v).replace('\xa0','').replace(' ','').replace(',','.')
+    try: return float(s)
+    except: return 0.0
+
+def read_f(f):
+    if f is None: return None
+    if f.name.endswith('.csv'): return pd.read_csv(f)
+    eng = 'xlrd' if f.name.endswith('.xls') else 'openpyxl'
+    return pd.read_excel(f, engine=eng)
+
+def find_col(df, kws):
+    for c in df.columns:
+        if any(k in str(c).lower() for k in kws): return c
+    return None
+
+def is_avail_ih(x):
+    return False if pd.isna(x) else ('наявн' in str(x).lower() or 'в налич' in str(x).lower())
+
+def is_avail_dsn(x):
+    return False if pd.isna(x) else ('в наявності' == str(x).strip().lower() or 'в налич' in str(x).lower())
+
+SKIP_ARTS  = {f'{i}*' for i in range(1,15)}
+SKIP_NAMES = {'доставка','нова пошта','новая почта','iherb','магазини'}
+
+def parse_sales(df_raw, step, data_row, min_rent_pct, n_months=None):
+    qty_off  = 4 if step==7 else 2
+    rent_off = 5 if step==7 else 3
+    months = []
+    for c in range(0, df_raw.shape[1], step):
+        val = cs(df_raw.iloc[1, c])
+        m = re.sub(r'Період[:\s]*', '', val).replace('р.','').strip()
+        if m: months.append((c, m))
+    if n_months: months = months[-n_months:]
+    records = {}
+    for col_s, mname in months:
+        for ri in range(data_row, df_raw.shape[0]):
+            name = cs(df_raw.iloc[ri, col_s])
+            art  = cs(df_raw.iloc[ri, col_s+1])
+            if not art or art in SKIP_ARTS: continue
+            if name.lower() in SKIP_NAMES: continue
+            qty  = to_num(df_raw.iloc[ri, col_s+qty_off])
+            rent = to_num(df_raw.iloc[ri, col_s+rent_off])
+            if qty <= 0: continue
+            if rent > 0 and rent < min_rent_pct: continue
+            if art not in records: records[art] = {'Назва': name, 'міс': {}}
+            records[art]['міс'][mname] = records[art]['міс'].get(mname, 0) + qty
+    if not records:
+        return pd.DataFrame(columns=['Артикул_IH','Назва','Продано_всього','Місяців','Середньодень'])
+    rows = []
+    n_m = len(months)
+    for art, v in records.items():
+        total = sum(v['міс'].values())
+        rows.append({'Артикул_IH':art, 'Назва':v['Назва'],
+                     'Продано_всього':total, 'Місяців':n_m,
+                     'Середньодень': total/(n_m*30) if n_m>0 else 0})
+    return pd.DataFrame(rows)
+
+def parse_stock(df_raw, data_row):
+    rows = []
+    for i in range(data_row, len(df_raw)):
+        art = cs(df_raw.iloc[i, 1])
+        qty = df_raw.iloc[i, 2]
+        if not art or art in SKIP_ARTS: continue
+        q = max(to_num(qty), 0)
+        rows.append({'Артикул_IH': art, 'Залишок': q})
+    if not rows: return pd.DataFrame(columns=['Артикул_IH','Залишок'])
+    return pd.DataFrame(rows).groupby('Артикул_IH')['Залишок'].sum().reset_index()
+
+def extract_bc(x):
+    if not isinstance(x, str): return None
+    m = re.search(r'Штрихкод[:\s]*(\d{10,14})', x)
+    return m.group(1) if m else None
+
+@st.cache_data
+def load_barcodes():
+    p = Path(__file__).parent / "data" / "barcodes.csv"
+    df = pd.read_csv(p)
+    df.columns = ['Артикул_IH','Назва_bc','Штрихкод']
+    df['Штрихкод']   = df['Штрихкод'].astype(str).str.strip()
+    df['Артикул_IH'] = df['Артикул_IH'].astype(str).str.strip()
+    return dict(zip(df['Штрихкод'], df['Артикул_IH']))
+
+# ── Uploaders ─────────────────────────────────────────────────────
+st.markdown('<div class="sh"><div class="dot" style="background:#0ea5e9"></div><h3>Завантаження файлів</h3></div>', unsafe_allow_html=True)
+c1,c2,c3 = st.columns(3)
+c4,c5,c6 = st.columns(3)
+with c1: f_site   = st.file_uploader("🌐 Сайт (1С: продажі + залишки)", type=["xlsx","xls"], help="Листи: 'продажі дані' та 'наявність на складі'")
+with c2: f_stores = st.file_uploader("🏪 Магазини (1С: продажі + залишки)", type=["xlsx","xls"], help="Листи: 'продажі магазини' та 'наявність на магазинах'")
+with c3: f_rrp    = st.file_uploader("💲 РРЦ", type=["xlsx","xls","csv"])
+with c4: f_ih     = st.file_uploader("📘 Прайс iHerb", type=["xlsx","xls","csv"])
+with c5: f_vw     = st.file_uploader("📗 Прайс VitaWorld", type=["xls","xlsx","csv"])
+with c6: f_dsn    = st.file_uploader("📙 Прайс DSN", type=["xlsx","xls","csv"])
+
+missing = [n for n,f in [("Сайт",f_site),("Магазини",f_stores),("РРЦ",f_rrp),
+                          ("iHerb",f_ih),("VitaWorld",f_vw),("DSN",f_dsn)] if not f]
+if missing:
+    st.info(f"Завантажте всі 6 файлів. Ще не завантажено: **{', '.join(missing)}**")
+    st.stop()
+
+# ── Parse ─────────────────────────────────────────────────────────
+with st.spinner("Обробка файлів..."):
+    bc_map = load_barcodes()
+
+    # Сайт
+    df_site_s = pd.read_excel(f_site, sheet_name='продажі дані', header=None)
+    df_site_z = pd.read_excel(f_site, sheet_name='наявність на складі', header=None)
+    sales_site  = parse_sales(df_site_s, step=5, data_row=13, min_rent_pct=min_rent, n_months=recent_months)
+    stock_site  = parse_stock(df_site_z, data_row=3)
+
+    # Магазини
+    df_store_s = pd.read_excel(f_stores, sheet_name='продажі магазини', header=None)
+    df_store_z = pd.read_excel(f_stores, sheet_name='наявність на магазинах', header=None)
+    sales_store = parse_sales(df_store_s, step=7, data_row=13, min_rent_pct=min_rent, n_months=recent_months)
+    stock_store = parse_stock(df_store_z, data_row=2)
+
+    # Зводимо
+    df_sales = pd.concat([sales_site, sales_store], ignore_index=True).groupby('Артикул_IH').agg(
+        Назва=('Назва','first'), Продано_всього=('Продано_всього','sum'),
+        Місяців=('Місяців','max'), Середньодень=('Середньодень','sum')).reset_index()
+    df_stock = pd.concat([stock_site, stock_store], ignore_index=True
+                         ).groupby('Артикул_IH')['Залишок'].sum().reset_index()
+
+    # РРЦ
+    raw_rrp = read_f(f_rrp); raw_rrp.columns = raw_rrp.columns.str.strip()
+    ar = find_col(raw_rrp,['артикул','sku']); dr = find_col(raw_rrp,['дата','period','період','date']); pr = find_col(raw_rrp,['цена','ціна','price'])
+    df_rrp = raw_rrp[[ar,dr,pr]].copy() if dr else raw_rrp[[ar,pr]].copy()
+    df_rrp.columns = ['Артикул_IH','Дата_РРЦ','РРЦ_UAH'] if dr else ['Артикул_IH','РРЦ_UAH']
+    df_rrp['Артикул_IH'] = df_rrp['Артикул_IH'].astype(str).str.strip()
+    df_rrp['РРЦ_UAH'] = pd.to_numeric(df_rrp['РРЦ_UAH'], errors='coerce')
+    if 'Дата_РРЦ' in df_rrp.columns:
+        df_rrp['Дата_РРЦ'] = pd.to_datetime(df_rrp['Дата_РРЦ'], errors='coerce')
+        df_rrp = df_rrp.sort_values('Дата_РРЦ').drop_duplicates('Артикул_IH', keep='last')
+    else:
+        df_rrp = df_rrp.drop_duplicates('Артикул_IH', keep='last')
+    df_rrp = df_rrp[['Артикул_IH','РРЦ_UAH']]
+
+    # iHerb прайс
+    raw_ih = read_f(f_ih); raw_ih.columns = raw_ih.columns.str.strip()
+    a_ih = find_col(raw_ih,['артикул','sku','article']); p_ih = find_col(raw_ih,['ціна','цена','price']); v_ih = find_col(raw_ih,['наявн','налич','availab'])
+    df_ih_p = raw_ih[[a_ih,p_ih]].copy(); df_ih_p.columns = ['Артикул_IH','Ціна_IH_USD']
+    df_ih_p['Наявність_IH'] = raw_ih[v_ih].values if v_ih else 'Є в наявності'
+    df_ih_p['Артикул_IH'] = df_ih_p['Артикул_IH'].astype(str).str.strip()
+    df_ih_p['Ціна_IH_USD'] = pd.to_numeric(df_ih_p['Ціна_IH_USD'], errors='coerce')
+    df_ih_p = df_ih_p.drop_duplicates('Артикул_IH')
+    nm_ih = find_col(raw_ih,['назв','name','номенклатура'])
+    if nm_ih: df_ih_p['Назва_IH'] = raw_ih[nm_ih].values[:len(df_ih_p)]
+
+    # VitaWorld
+    try:
+        raw_vw = pd.read_excel(f_vw, header=None, engine='xlrd' if f_vw.name.endswith('.xls') else 'openpyxl')
+        vw_rows = []
+        for _, row in raw_vw.iterrows():
+            art = row[2]
+            if pd.notna(art) and isinstance(art,str) and art.strip() and art.strip()!='Артикул':
+                bc = row[10] if len(row)>10 else None
+                bc_s = str(int(float(bc))) if pd.notna(bc) else ''
+                try: bc_s = str(int(float(bc))) if pd.notna(bc) else ''
+                except: bc_s = str(bc).strip() if pd.notna(bc) else ''
+                vw_rows.append({'Артикул_VW':art.strip(), 'Назва_VW': str(row[3]).strip() if pd.notna(row[3]) else '',
+                                'Ціна_VW_USD':pd.to_numeric(row[5],errors='coerce'), 'Штрихкод':bc_s})
+        df_vw_p = pd.DataFrame(vw_rows)
+        df_vw_p['Артикул_IH'] = df_vw_p['Штрихкод'].apply(lambda x: bc_map.get(str(x).strip()) if x else None)
+    except Exception as e:
+        st.warning(f"VitaWorld помилка: {e}"); df_vw_p = pd.DataFrame(columns=['Артикул_VW','Назва_VW','Ціна_VW_USD','Штрихкод','Артикул_IH'])
+
+    # DSN
+    raw_dsn = read_f(f_dsn); raw_dsn.columns = raw_dsn.columns.str.strip()
+    a_dsn = find_col(raw_dsn,['артикул']); p_dsn = find_col(raw_dsn,['цена','ціна','price'])
+    av_dsn = find_col(raw_dsn,['наличие','наявн']); desc_c = find_col(raw_dsn,['описание товара (ua)','опис товара'])
+    df_dsn_p = raw_dsn[[a_dsn,p_dsn]].copy(); df_dsn_p.columns = ['Артикул_DSN','Ціна_DSN_UAH']
+    if av_dsn: df_dsn_p['Наявність_DSN'] = raw_dsn[av_dsn].values
+    df_dsn_p['Артикул_DSN'] = df_dsn_p['Артикул_DSN'].astype(str).str.strip()
+    df_dsn_p['Ціна_DSN_UAH'] = pd.to_numeric(df_dsn_p['Ціна_DSN_UAH'], errors='coerce')
+    if desc_c:
+        df_dsn_p['Штрихкод_DSN'] = raw_dsn[desc_c].apply(extract_bc)
+        df_dsn_p['Артикул_IH'] = df_dsn_p['Штрихкод_DSN'].apply(lambda x: bc_map.get(str(x).strip()) if pd.notna(x) else None)
+    else: df_dsn_p['Артикул_IH'] = None
+
+# ── Demand ────────────────────────────────────────────────────────
+df = df_sales.merge(df_stock, on='Артикул_IH', how='left')
+df['Залишок'] = df['Залишок'].fillna(0)
+df['Потреба'] = ((df['Середньодень'] * total_days) - df['Залишок']).clip(lower=0).round().astype(int)
+
+# ABC
+total_s = df['Продано_всього'].sum()
+ds = df.sort_values('Продано_всього', ascending=False).copy()
+ds['cum'] = ds['Продано_всього'].cumsum() / total_s if total_s > 0 else 0
+ds['ABC'] = ds['cum'].apply(lambda x: 'A' if x<=.20 else ('B' if x<=.50 else 'C'))
+df = df.merge(ds[['Артикул_IH','ABC']], on='Артикул_IH', how='left')
+df['ABC'] = df['ABC'].fillna('C')
+df = df[df['ABC'].isin(abc_inc)]
+
+# Merge prices
+df = df.merge(df_ih_p[['Артикул_IH','Ціна_IH_USD','Наявність_IH']+(['Назва_IH'] if 'Назва_IH' in df_ih_p.columns else [])], on='Артикул_IH', how='left')
+vw_m = df_vw_p[df_vw_p['Артикул_IH'].notna()][['Артикул_IH','Артикул_VW','Ціна_VW_USD']].drop_duplicates('Артикул_IH')
+df = df.merge(vw_m, on='Артикул_IH', how='left')
+dsn_cols = ['Артикул_IH','Артикул_DSN','Ціна_DSN_UAH']+(['Наявність_DSN'] if 'Наявність_DSN' in df_dsn_p.columns else [])
+dsn_m = df_dsn_p[df_dsn_p['Артикул_IH'].notna()][dsn_cols].drop_duplicates('Артикул_IH')
+df = df.merge(dsn_m, on='Артикул_IH', how='left')
+df = df.merge(df_rrp, on='Артикул_IH', how='left')
+if 'Назва_IH' in df.columns:
+    df['Назва'] = df['Назва_IH'].where(df['Назва_IH'].notna() & (df['Назва_IH']!=''), df['Назва'])
+
+# Currency
+if disp_cur=='UAH':
+    df['p_IH']=df['Ціна_IH_USD']*usd_rate; df['p_VW']=df['Ціна_VW_USD']*usd_rate
+    df['p_DSN']=df['Ціна_DSN_UAH']; df['p_RRP']=df['РРЦ_UAH']
+else:
+    df['p_IH']=df['Ціна_IH_USD']; df['p_VW']=df['Ціна_VW_USD']
+    df['p_DSN']=df['Ціна_DSN_UAH']/usd_rate; df['p_RRP']=df['РРЦ_UAH']/usd_rate
+
+# Availability
+if only_avail:
+    df['av_IH']  = df['Наявність_IH'].apply(is_avail_ih)
+    df['av_VW']  = df['Артикул_VW'].notna() & df['p_VW'].notna()
+    df['av_DSN'] = df.get('Наявність_DSN', pd.Series(False,index=df.index)).apply(is_avail_dsn) if 'Наявність_DSN' in df.columns else df['p_DSN'].notna()
+else:
+    df['av_IH']=df['p_IH'].notna(); df['av_VW']=df['p_VW'].notna(); df['av_DSN']=df['p_DSN'].notna()
+
+df['eff_IH']  = df['p_IH'].where(df['av_IH']  & df['p_IH'].notna())
+df['eff_VW']  = df['p_VW'].where(df['av_VW']  & df['p_VW'].notna())
+df['eff_DSN'] = df['p_DSN'].where(df['av_DSN'] & df['p_DSN'].notna())
+
+# Best supplier
+def choose(row):
+    opts = {k:v for k,v in {'iHerb':row['eff_IH'],'VitaWorld':row['eff_VW'],'DSN':row['eff_DSN']}.items() if pd.notna(v)}
+    if not opts: return pd.Series({'Постачальник':'—','Ціна_закупівлі':np.nan,'Сума':np.nan,'Рівні_ціни':False})
+    best=min(opts,key=opts.get); bval=opts[best]
+    near=sum(1 for v in opts.values() if v<=bval*1.05)>1
+    qty=max(int(row['Потреба']),1)
+    return pd.Series({'Постачальник':best,'Ціна_закупівлі':bval,'Сума':bval*qty,'Рівні_ціни':near})
+
+df[['Постачальник','Ціна_закупівлі','Сума','Рівні_ціни']] = df.apply(choose, axis=1)
+
+# Margin
+def get_mg(row, sup):
+    pm={'iHerb':row['eff_IH'],'VitaWorld':row['eff_VW'],'DSN':row['eff_DSN']}
+    cost=pm.get(sup); rrp=row['p_RRP']
+    if pd.isna(rrp) or pd.isna(cost) or rrp<=0: return np.nan
+    return round((rrp-cost)/rrp*100,1)
+
+df['Маржа_%']   = df.apply(lambda r: get_mg(r,r['Постачальник']),axis=1)
+df['Маржа_IH']  = df.apply(lambda r: get_mg(r,'iHerb'),axis=1)
+df['Маржа_VW']  = df.apply(lambda r: get_mg(r,'VitaWorld'),axis=1)
+df['Маржа_DSN'] = df.apply(lambda r: get_mg(r,'DSN'),axis=1)
+df['Маржа_ОК']     = df['Маржа_%'].apply(lambda x: pd.isna(x) or x>=margin_min)
+df['Підняти_РРЦ']  = df['Маржа_%'].apply(lambda x: pd.notna(x) and x<margin_min)
+df['Економія'] = df.apply(lambda r: (max([v for v in [r['eff_IH'],r['eff_VW'],r['eff_DSN']] if pd.notna(v)]+[0])-r['Ціна_закупівлі'])*max(int(r['Потреба']),1) if pd.notna(r['Ціна_закупівлі']) else 0, axis=1)
+
+# ── KPIs ──────────────────────────────────────────────────────────
+found = df[df['Постачальник']!='—']
+total_sum = found['Сума'].sum(); savings = found['Економія'].sum()
+low_mg = df['Підняти_РРЦ'].sum(); avg_mg = df[df['Маржа_%'].notna()]['Маржа_%'].mean()
+
+st.markdown('<div class="sh"><div class="dot" style="background:#f59e0b"></div><h3>Результати аналізу</h3></div>', unsafe_allow_html=True)
+p_label = f"останні {recent_months} міс." if recent_months else "весь період"
+st.caption(f"Продажі: **{p_label}** · Ігноруємо рент. < **{min_rent}%** · Покриття: **{total_days} дн.** (горизонт {horizon} + lead {lead_time} + запас {safety})")
+
+st.markdown(f"""<div class="kpi-row">
+<div class="kpi sky"><div class="l">Сума замовлення</div><div class="v">{total_sum:,.0f}</div><div class="s">{cur}</div></div>
+<div class="kpi grn"><div class="l">Знайдено</div><div class="v">{len(found)}</div><div class="s">з {len(df)} позицій</div></div>
+<div class="kpi vio"><div class="l">Економія</div><div class="v">{savings:,.0f}</div><div class="s">{cur} vs найдорожчий</div></div>
+<div class="kpi amb"><div class="l">Середня маржа</div><div class="v">{avg_mg:.1f}%</div><div class="s">поріг {margin_min}%</div></div>
+<div class="kpi red"><div class="l">⚠️ Підняти РРЦ</div><div class="v">{int(low_mg)}</div><div class="s">маржа < {margin_min}%</div></div>
+</div>""", unsafe_allow_html=True)
+
+sup_html = '<div class="sup-row">'
+for sup,cls,ico in [('iHerb','ih','🔵'),('VitaWorld','vw','🟢'),('DSN','dsn','🟡')]:
+    sub = found[found['Постачальник']==sup]
+    if len(sub): sup_html += f'<div class="sc {cls}"><div class="sn">{ico} {sup}</div><div class="sv">{sub["Сума"].sum():,.0f} {cur}</div><div class="sd">{len(sub)} позицій · {int(sub["Потреба"].sum())} одиниць</div></div>'
+sup_html += '</div>'
+st.markdown(sup_html, unsafe_allow_html=True)
+
+# ── Tables ────────────────────────────────────────────────────────
+def build_tbl(data):
+    t=pd.DataFrame()
+    t['Артикул']=data['Артикул_IH']; t['Назва']=data['Назва']; t['ABC']=data['ABC']
+    t['Залишок']=data['Залишок'].astype(int); t['Потреба']=data['Потреба']
+    t['Постачальник']=data['Постачальник']
+    t[f'Ціна ({cur})']=data['Ціна_закупівлі'].round(2); t[f'РРЦ ({cur})']=data['p_RRP'].round(2)
+    t['Маржа %']=data['Маржа_%']; t['⚠️ РРЦ']=data['Підняти_РРЦ']; t[f'Сума ({cur})']=data['Сума'].round(2)
+    t[f'iHerb ({cur})']=data['eff_IH'].round(2); t[f'VW ({cur})']=data['eff_VW'].round(2); t[f'DSN ({cur})']=data['eff_DSN'].round(2)
+    t['≈ Рівні']=data['Рівні_ціни']; t['Маржа iH %']=data['Маржа_IH']; t['Маржа VW %']=data['Маржа_VW']; t['Маржа DSN %']=data['Маржа_DSN']
+    t['Продано']=data['Продано_всього'].astype(int)
+    return t
+
+cfg={'Назва':st.column_config.TextColumn(width='large'),'ABC':st.column_config.TextColumn(width='small'),
+     '⚠️ РРЦ':st.column_config.CheckboxColumn(width='small'),'≈ Рівні':st.column_config.CheckboxColumn(width='small'),
+     **{f'{k} ({cur})':st.column_config.NumberColumn(format='%.2f') for k in ['Ціна','РРЦ','Сума','iHerb','VW','DSN']},
+     **{f'Маржа{k}':st.column_config.NumberColumn(format='%.1f %%') for k in [' %',' iH %',' VW %',' DSN %']}}
+
+def show_tab(subset, sup=None):
+    if sup: subset=subset[subset['Постачальник']==sup]
+    if not len(subset): st.info("Немає позицій"); return
+    st.dataframe(build_tbl(subset), use_container_width=True, hide_index=True, column_config=cfg)
+    st.markdown(f"**{subset['Сума'].sum():,.2f} {cur}** · {len(subset)} позицій · {int(subset['Потреба'].sum())} одиниць")
+
+n_low=int(df['Підняти_РРЦ'].sum()); n_miss=int((df['Постачальник']=='—').sum())
+tabs=st.tabs(["📋 Всі","🔵 iHerb","🟢 VitaWorld","🟡 DSN",f"⚠️ Підняти РРЦ ({n_low})",f"❌ Не знайдено ({n_miss})"])
+with tabs[0]: show_tab(found)
+with tabs[1]: show_tab(found,'iHerb')
+with tabs[2]: show_tab(found,'VitaWorld')
+with tabs[3]: show_tab(found,'DSN')
+with tabs[4]:
+    low=df[df['Підняти_РРЦ']]
+    if len(low): show_tab(low); st.warning(f"⚠️ {len(low)} позицій: маржа нижче {margin_min}%. Розгляньте підняття РРЦ або зміну постачальника.")
+    else: st.success(f"✅ Всі позиції з маржею ≥ {margin_min}%")
+with tabs[5]:
+    miss=df[df['Постачальник']=='—'][['Артикул_IH','Назва','ABC','Продано_всього','Залишок']]
+    miss.columns=['Артикул','Назва','ABC','Продано','Залишок']
+    st.dataframe(miss, use_container_width=True, hide_index=True)
+
+# ── Export ────────────────────────────────────────────────────────
+st.markdown('<div class="sh"><div class="dot" style="background:#22c55e"></div><h3>Експорт замовлень</h3></div>', unsafe_allow_html=True)
+
+def sup_sheet(writer, sup, data):
+    sub=data[data['Постачальник']==sup]
+    if not len(sub): return
+    out=pd.DataFrame({'Артикул (iHerb)':sub['Артикул_IH'],'Назва':sub['Назва'],'ABC':sub['ABC']})
+    if sup=='VitaWorld' and 'Артикул_VW' in sub.columns: out['Артикул VW']=sub['Артикул_VW']
+    if sup=='DSN' and 'Артикул_DSN' in sub.columns: out['Артикул DSN']=sub['Артикул_DSN']
+    out['Залишок']=sub['Залишок'].astype(int); out['Потреба (шт.)']=sub['Потреба']
+    out[f'Ціна ({cur})']=sub['Ціна_закупівлі'].round(2); out[f'РРЦ ({cur})']=sub['p_RRP'].round(2)
+    out['Маржа %']=sub['Маржа_%']; out['⚠️ Підняти РРЦ']=sub['Підняти_РРЦ']
+    out[f'Сума ({cur})']=sub['Сума'].round(2)
+    out.to_excel(writer, index=False, sheet_name=sup)
+
+def make_full():
+    buf=io.BytesIO()
+    with pd.ExcelWriter(buf,engine='openpyxl') as w:
+        rows=[{'Постачальник':s,'Позицій':len(found[found['Постачальник']==s]),
+               'Одиниць':int(found[found['Постачальник']==s]['Потреба'].sum()),
+               f'Сума ({cur})':round(found[found['Постачальник']==s]['Сума'].sum(),2),
+               'Серед. маржа %':round(found[found['Постачальник']==s]['Маржа_%'].mean(),1)
+               if found[found['Постачальник']==s]['Маржа_%'].notna().any() else None}
+              for s in ['iHerb','VitaWorld','DSN'] if len(found[found['Постачальник']==s])]
+        pd.DataFrame(rows).to_excel(w,index=False,sheet_name='Зведення')
+        for s in ['iHerb','VitaWorld','DSN']: sup_sheet(w,s,found)
+        low_df=df[df['Підняти_РРЦ']]
+        if len(low_df):
+            pd.DataFrame({'Артикул':low_df['Артикул_IH'],'Назва':low_df['Назва'],
+                          'Постачальник':low_df['Постачальник'],
+                          f'Ціна ({cur})':low_df['Ціна_закупівлі'].round(2),
+                          f'РРЦ ({cur})':low_df['p_RRP'].round(2),'Маржа %':low_df['Маржа_%'],
+                          f'Різниця ({cur})':((low_df['p_RRP']-low_df['Ціна_закупівлі'])*-1).round(2)
+                          }).to_excel(w,index=False,sheet_name='⚠️ Підняти РРЦ')
+        miss2=df[df['Постачальник']=='—'][['Артикул_IH','Назва','ABC','Продано_всього','Залишок']]
+        if len(miss2): miss2.to_excel(w,index=False,sheet_name='Не знайдено')
+    return buf.getvalue()
+
+def make_sup_xlsx(sup):
+    sub=found[found['Постачальник']==sup]
+    if not len(sub): return None
+    buf=io.BytesIO()
+    with pd.ExcelWriter(buf,engine='openpyxl') as w: sup_sheet(w,sup,found)
+    return buf.getvalue()
+
+date_s=datetime.now().strftime('%Y%m%d')
+e1,e2,e3,e4=st.columns(4)
+with e1:
+    d=make_sup_xlsx('iHerb')
+    if d: st.download_button("⬇️ iHerb",d,f"order_iherb_{date_s}.xlsx",use_container_width=True)
+with e2:
+    d=make_sup_xlsx('VitaWorld')
+    if d: st.download_button("⬇️ VitaWorld",d,f"order_vw_{date_s}.xlsx",use_container_width=True)
+with e3:
+    d=make_sup_xlsx('DSN')
+    if d: st.download_button("⬇️ DSN",d,f"order_dsn_{date_s}.xlsx",use_container_width=True)
+with e4:
+    st.download_button("📥 Повне замовлення",make_full(),f"procurement_{date_s}.xlsx",
+        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        use_container_width=True,type='primary')
+
+st.caption(f"Курс: 1 USD = {usd_rate} UAH · Покриття: {total_days} дн. · Ігнор. рент. < {min_rent}% · Поріг маржі: {margin_min}% · ABC: {', '.join(abc_inc)}")
