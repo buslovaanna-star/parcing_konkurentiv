@@ -153,7 +153,20 @@ def extract_bc(x):
 
 @st.cache_data
 def load_barcodes():
-    p = Path(__file__).parent / "data" / "barcodes.csv"
+    # Спробуємо кілька варіантів шляху для сумісності з Streamlit Cloud
+    candidates = [
+        Path(__file__).parent / "data" / "barcodes.csv",
+        Path("data/barcodes.csv"),
+        Path("/mount/src") / Path(__file__).parent.name / "data" / "barcodes.csv",
+    ]
+    p = None
+    for c in candidates:
+        if c.exists():
+            p = c
+            break
+    if p is None:
+        st.error("❌ Файл data/barcodes.csv не знайдено. Переконайтесь що він є в репозиторії у папці data/")
+        st.stop()
     df = pd.read_csv(p)
     df.columns = ['Артикул_IH','Назва_bc','Штрихкод']
     df['Штрихкод']   = df['Штрихкод'].astype(str).str.strip()
