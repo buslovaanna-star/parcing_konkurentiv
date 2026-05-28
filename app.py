@@ -301,6 +301,7 @@ ds['ABC'] = ds['cum'].apply(lambda x: 'A' if x<=.20 else ('B' if x<=.50 else 'C'
 df = df.merge(ds[['Артикул_IH','ABC']], on='Артикул_IH', how='left')
 df['ABC'] = df['ABC'].fillna('C')
 df = df[df['ABC'].isin(abc_inc)]
+df['Середньомісячні'] = (df['Середньодень'] * 30).round(1)
 
 # Merge prices
 df = df.merge(df_ih_p[['Артикул_IH','Ціна_IH_USD','Наявність_IH']+(['Назва_IH'] if 'Назва_IH' in df_ih_p.columns else [])], on='Артикул_IH', how='left')
@@ -339,8 +340,9 @@ def choose(row):
     if not opts: return pd.Series({'Постачальник':'—','Ціна_закупівлі':np.nan,'Сума':np.nan,'Рівні_ціни':False})
     best=min(opts,key=opts.get); bval=opts[best]
     near=sum(1 for v in opts.values() if v<=bval*1.05)>1
-    qty=max(int(row['Потреба']),1)
-    return pd.Series({'Постачальник':best,'Ціна_закупівлі':bval,'Сума':bval*qty,'Рівні_ціни':near})
+    qty=int(row['Потреба'])
+    suma = bval*qty if qty > 0 else 0
+    return pd.Series({'Постачальник':best,'Ціна_закупівлі':bval,'Сума':suma,'Рівні_ціни':near})
 
 df[['Постачальник','Ціна_закупівлі','Сума','Рівні_ціни']] = df.apply(choose, axis=1)
 
@@ -357,7 +359,7 @@ df['Маржа_VW']  = df.apply(lambda r: get_mg(r,'VitaWorld'),axis=1)
 df['Маржа_DSN'] = df.apply(lambda r: get_mg(r,'DSN'),axis=1)
 df['Маржа_ОК']     = df['Маржа_%'].apply(lambda x: pd.isna(x) or x>=margin_min)
 df['Підняти_РРЦ']  = df['Маржа_%'].apply(lambda x: pd.notna(x) and x<margin_min)
-df['Економія'] = df.apply(lambda r: (max([v for v in [r['eff_IH'],r['eff_VW'],r['eff_DSN']] if pd.notna(v)]+[0])-r['Ціна_закупівлі'])*max(int(r['Потреба']),1) if pd.notna(r['Ціна_закупівлі']) else 0, axis=1)
+df['Економія'] = df.apply(lambda r: (max([v for v in [r['eff_IH'],r['eff_VW'],r['eff_DSN']] if pd.notna(v)]+[0])-r['Ціна_закупівлі'])*int(r['Потреба']) if pd.notna(r['Ціна_закупівлі']) and r['Потреба']>0 else 0, axis=1)
 
 # ── KPIs ──────────────────────────────────────────────────────────
 found = df[df['Постачальник']!='—']
@@ -395,14 +397,16 @@ def build_tbl(data):
     t['Маржа %']=data['Маржа_%']; t['⚠️ РРЦ']=data['Підняти_РРЦ']; t[f'Сума ({cur})']=data['Сума'].round(2)
     t[f'iHerb ({cur})']=data['eff_IH'].round(2); t[f'VW ({cur})']=data['eff_VW'].round(2); t[f'DSN ({cur})']=data['eff_DSN'].round(2)
     t['≈ Рівні']=data['Рівні_ціни']; t['Маржа iH %']=data['Маржа_IH']; t['Маржа VW %']=data['Маржа_VW']; t['Маржа DSN %']=data['Маржа_DSN']
-    t['Продано']=data['Продано_всього'].astype(int)
+    t['Продано всього']=data['Продано_всього'].astype(int)
+    t['Серед./міс.']=data['Середньомісячні'].round(1) if 'Середньомісячні' in data.columns else 0
     return t
 
 cfg={'Назва':st.column_config.TextColumn(width='large'),'ABC':st.column_config.TextColumn(width='small'),
      '🚚 В дорозі':st.column_config.NumberColumn(width='small'),
      '⚠️ РРЦ':st.column_config.CheckboxColumn(width='small'),'≈ Рівні':st.column_config.CheckboxColumn(width='small'),
      **{f'{k} ({cur})':st.column_config.NumberColumn(format='%.2f') for k in ['Ціна','РРЦ','Сума','iHerb','VW','DSN']},
-     **{f'Маржа{k}':st.column_config.NumberColumn(format='%.1f %%') for k in [' %',' iH %',' VW %',' DSN %']}}
+     **{f'Маржа{k}':st.column_config.NumberColumn(format='%.1f %%') for k in [' %',' iH %',' VW %',' DSN %']},
+     'Серед./міс.':st.column_config.NumberColumn(format='%.1f')}
 
 def show_tab(subset, sup=None):
     if sup: subset=subset[subset['Постачальник']==sup]
@@ -481,6 +485,18 @@ def sup_sheet(writer, sup, data):
     out['Маржа %']=sub['Маржа_%']; out['⚠️ Підняти РРЦ']=sub['Підняти_РРЦ']
     out[f'Сума ({cur})']=sub['Сума'].round(2)
     out.to_excel(writer, index=False, sheet_name=sup)
+    # Червона підсвітка рядків де треба підняти РРЦ
+    try:
+        from openpyxl.styles import PatternFill
+        ws_out = writer.sheets[sup]
+        red_fill = PatternFill('solid', start_color='FFCCCC', fgColor='FFCCCC')
+        raise_rrp = sub['Підняти_РРЦ'].values
+        for row_i, is_low in enumerate(raise_rrp, start=2):
+            if is_low:
+                for col_i in range(1, len(out.columns)+1):
+                    ws_out.cell(row=row_i, column=col_i).fill = red_fill
+    except Exception:
+        pass
 
 def make_full():
     buf=io.BytesIO()
