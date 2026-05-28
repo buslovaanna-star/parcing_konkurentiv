@@ -142,9 +142,13 @@ def parse_stock(df_raw, data_row):
         qty = df_raw.iloc[i, 2]
         if not art or art in SKIP_ARTS: continue
         q = max(to_num(qty), 0)
-        rows.append({'Артикул_IH': art, 'Залишок': q})
-    if not rows: return pd.DataFrame(columns=['Артикул_IH','Залишок'])
-    return pd.DataFrame(rows).groupby('Артикул_IH')['Залишок'].sum().reset_index()
+        # Колонка 3 = "Замовлено у постачальників" (товар в дорозі)
+        in_transit = to_num(df_raw.iloc[i, 3]) if df_raw.shape[1] > 3 else 0
+        in_transit = max(in_transit, 0)
+        rows.append({'Артикул_IH': art, 'Залишок': q, 'В_дорозі': in_transit})
+    if not rows: return pd.DataFrame(columns=['Артикул_IH','Залишок','В_дорозі'])
+    return pd.DataFrame(rows).groupby('Артикул_IH').agg(
+        Залишок=('Залишок','sum'), В_дорозі=('В_дорозі','sum')).reset_index()
 
 def extract_bc(x):
     if not isinstance(x, str): return None
@@ -211,7 +215,8 @@ with st.spinner("Обробка файлів..."):
         Назва=('Назва','first'), Продано_всього=('Продано_всього','sum'),
         Місяців=('Місяців','max'), Середньодень=('Середньодень','sum')).reset_index()
     df_stock = pd.concat([stock_site, stock_store], ignore_index=True
-                         ).groupby('Артикул_IH')['Залишок'].sum().reset_index()
+                         ).groupby('Артикул_IH').agg(
+        Залишок=('Залишок','sum'), В_дорозі=('В_дорозі','sum')).reset_index()
 
     # РРЦ
     raw_rrp = read_f(f_rrp); raw_rrp.columns = raw_rrp.columns.str.strip()
@@ -236,7 +241,13 @@ with st.spinner("Обробка файлів..."):
     df_ih_p['Ціна_IH_USD'] = pd.to_numeric(df_ih_p['Ціна_IH_USD'], errors='coerce')
     df_ih_p = df_ih_p.drop_duplicates('Артикул_IH')
     nm_ih = find_col(raw_ih,['назв','name','номенклатура'])
-    if nm_ih: df_ih_p['Назва_IH'] = raw_ih[nm_ih].values[:len(df_ih_p)]
+    if nm_ih:
+        # Правильний merge по артикулу - без зсуву після drop_duplicates
+        names_df = raw_ih[[a_ih, nm_ih]].copy()
+        names_df.columns = ['Артикул_IH','Назва_IH']
+        names_df['Артикул_IH'] = names_df['Артикул_IH'].astype(str).str.strip()
+        names_df = names_df.drop_duplicates('Артикул_IH', keep='first')
+        df_ih_p = df_ih_p.merge(names_df, on='Артикул_IH', how='left')
 
     # VitaWorld
     try:
@@ -246,9 +257,16 @@ with st.spinner("Обробка файлів..."):
             art = row[2]
             if pd.notna(art) and isinstance(art,str) and art.strip() and art.strip()!='Артикул':
                 bc = row[10] if len(row)>10 else None
-                bc_s = str(int(float(bc))) if pd.notna(bc) else ''
-                try: bc_s = str(int(float(bc))) if pd.notna(bc) else ''
-                except: bc_s = str(bc).strip() if pd.notna(bc) else ''
+                bc_s = ''
+                if pd.notna(bc):
+                    bc_raw = str(bc).strip()
+                    # Беремо лише числові штрихкоди EAN/UPC (не ASIN типу X000QWJYKZ)
+                    digits_only = bc_raw.replace('.','').replace(',','')
+                    if digits_only.isdigit() and 10 <= len(digits_only) <= 14:
+                        try: bc_s = str(int(float(bc_raw)))
+                        except: bc_s = ''
+                    else:
+                        bc_s = ''  # пропускаємо нечислові коди''
                 vw_rows.append({'Артикул_VW':art.strip(), 'Назва_VW': str(row[3]).strip() if pd.notna(row[3]) else '',
                                 'Ціна_VW_USD':pd.to_numeric(row[5],errors='coerce'), 'Штрихкод':bc_s})
         df_vw_p = pd.DataFrame(vw_rows)
@@ -271,7 +289,8 @@ with st.spinner("Обробка файлів..."):
 
 # ── Demand ────────────────────────────────────────────────────────
 df = df_sales.merge(df_stock, on='Артикул_IH', how='left')
-df['Залишок'] = df['Залишок'].fillna(0)
+df['Залишок']  = df['Залишок'].fillna(0)
+df['В_дорозі'] = df['В_дорозі'].fillna(0) if 'В_дорозі' in df.columns else 0
 df['Потреба'] = ((df['Середньодень'] * total_days) - df['Залишок']).clip(lower=0).round().astype(int)
 
 # ABC
@@ -368,7 +387,9 @@ st.markdown(sup_html, unsafe_allow_html=True)
 def build_tbl(data):
     t=pd.DataFrame()
     t['Артикул']=data['Артикул_IH']; t['Назва']=data['Назва']; t['ABC']=data['ABC']
-    t['Залишок']=data['Залишок'].astype(int); t['Потреба']=data['Потреба']
+    t['Залишок']=data['Залишок'].astype(int)
+    t['🚚 В дорозі']=data['В_дорозі'].astype(int) if 'В_дорозі' in data.columns else 0
+    t['Потреба']=data['Потреба']
     t['Постачальник']=data['Постачальник']
     t[f'Ціна ({cur})']=data['Ціна_закупівлі'].round(2); t[f'РРЦ ({cur})']=data['p_RRP'].round(2)
     t['Маржа %']=data['Маржа_%']; t['⚠️ РРЦ']=data['Підняти_РРЦ']; t[f'Сума ({cur})']=data['Сума'].round(2)
