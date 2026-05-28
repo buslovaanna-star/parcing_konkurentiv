@@ -399,6 +399,7 @@ def build_tbl(data):
     return t
 
 cfg={'Назва':st.column_config.TextColumn(width='large'),'ABC':st.column_config.TextColumn(width='small'),
+     '🚚 В дорозі':st.column_config.NumberColumn(width='small'),
      '⚠️ РРЦ':st.column_config.CheckboxColumn(width='small'),'≈ Рівні':st.column_config.CheckboxColumn(width='small'),
      **{f'{k} ({cur})':st.column_config.NumberColumn(format='%.2f') for k in ['Ціна','РРЦ','Сума','iHerb','VW','DSN']},
      **{f'Маржа{k}':st.column_config.NumberColumn(format='%.1f %%') for k in [' %',' iH %',' VW %',' DSN %']}}
@@ -410,16 +411,56 @@ def show_tab(subset, sup=None):
     st.markdown(f"**{subset['Сума'].sum():,.2f} {cur}** · {len(subset)} позицій · {int(subset['Потреба'].sum())} одиниць")
 
 n_low=int(df['Підняти_РРЦ'].sum()); n_miss=int((df['Постачальник']=='—').sum())
-tabs=st.tabs(["📋 Всі","🔵 iHerb","🟢 VitaWorld","🟡 DSN",f"⚠️ Підняти РРЦ ({n_low})",f"❌ Не знайдено ({n_miss})"])
+tabs=st.tabs(["📋 Всі","🔵 iHerb","🟢 VitaWorld","🟡 DSN",
+              "💹 Порівняння цін",f"⚠️ Підняти РРЦ ({n_low})",f"❌ Не знайдено ({n_miss})"])
 with tabs[0]: show_tab(found)
 with tabs[1]: show_tab(found,'iHerb')
 with tabs[2]: show_tab(found,'VitaWorld')
 with tabs[3]: show_tab(found,'DSN')
 with tabs[4]:
+    # Порівняння цін всіх постачальників
+    st.caption("Всі позиції де є хоча б 2 постачальники — порівняння цін і маржі")
+    price_df = df[df[['eff_IH','eff_VW','eff_DSN']].notna().sum(axis=1) >= 1].copy()
+    if len(price_df):
+        cmp = pd.DataFrame()
+        cmp['Артикул']        = price_df['Артикул_IH']
+        cmp['Назва']          = price_df['Назва']
+        cmp['ABC']            = price_df['ABC']
+        cmp['Залишок']        = price_df['Залишок'].astype(int)
+        cmp['🚚 В дорозі']   = price_df['В_дорозі'].astype(int) if 'В_дорозі' in price_df.columns else 0
+        cmp['Потреба']        = price_df['Потреба']
+        cmp[f'iHerb ({cur})']     = price_df['eff_IH'].round(2)
+        cmp[f'VitaWorld ({cur})'] = price_df['eff_VW'].round(2)
+        cmp[f'DSN ({cur})']       = price_df['eff_DSN'].round(2)
+        cmp[f'РРЦ ({cur})']       = price_df['p_RRP'].round(2)
+        cmp['Маржа iH %']     = price_df['Маржа_IH']
+        cmp['Маржа VW %']     = price_df['Маржа_VW']
+        cmp['Маржа DSN %']    = price_df['Маржа_DSN']
+        cmp['✅ Найкраща']    = price_df['Постачальник']
+        cmp['Різниця min-max %'] = price_df.apply(
+            lambda r: round((max(filter(pd.notna,[r['eff_IH'],r['eff_VW'],r['eff_DSN']]+[0]))-
+                             min(filter(pd.notna,[r['eff_IH'],r['eff_VW'],r['eff_DSN']]+[999999])))/
+                             max(min(filter(pd.notna,[r['eff_IH'],r['eff_VW'],r['eff_DSN']]+[1])),1)*100,1)
+            if pd.notna(r['eff_IH']) or pd.notna(r['eff_VW']) or pd.notna(r['eff_DSN']) else 0, axis=1)
+        cmp = cmp.sort_values('Різниця min-max %', ascending=False)
+        cmp_cfg = {
+            'Назва': st.column_config.TextColumn(width='large'),
+            'ABC':   st.column_config.TextColumn(width='small'),
+            **{f'{k} ({cur})': st.column_config.NumberColumn(format='%.2f')
+               for k in ['iHerb','VitaWorld','DSN','РРЦ']},
+            **{f'Маржа {k} %': st.column_config.NumberColumn(format='%.1f %%')
+               for k in ['iH','VW','DSN']},
+            'Різниця min-max %': st.column_config.NumberColumn(format='%.1f %%'),
+        }
+        st.dataframe(cmp, use_container_width=True, hide_index=True, column_config=cmp_cfg)
+        st.markdown(f"**{len(cmp)} позицій**")
+    else:
+        st.info("Немає позицій з цінами постачальників")
+with tabs[5]:
     low=df[df['Підняти_РРЦ']]
     if len(low): show_tab(low); st.warning(f"⚠️ {len(low)} позицій: маржа нижче {margin_min}%. Розгляньте підняття РРЦ або зміну постачальника.")
     else: st.success(f"✅ Всі позиції з маржею ≥ {margin_min}%")
-with tabs[5]:
+with tabs[6]:
     miss=df[df['Постачальник']=='—'][['Артикул_IH','Назва','ABC','Продано_всього','Залишок']]
     miss.columns=['Артикул','Назва','ABC','Продано','Залишок']
     st.dataframe(miss, use_container_width=True, hide_index=True)
@@ -433,7 +474,9 @@ def sup_sheet(writer, sup, data):
     out=pd.DataFrame({'Артикул (iHerb)':sub['Артикул_IH'],'Назва':sub['Назва'],'ABC':sub['ABC']})
     if sup=='VitaWorld' and 'Артикул_VW' in sub.columns: out['Артикул VW']=sub['Артикул_VW']
     if sup=='DSN' and 'Артикул_DSN' in sub.columns: out['Артикул DSN']=sub['Артикул_DSN']
-    out['Залишок']=sub['Залишок'].astype(int); out['Потреба (шт.)']=sub['Потреба']
+    out['Залишок']=sub['Залишок'].astype(int)
+    out['🚚 В дорозі']=sub['В_дорозі'].astype(int) if 'В_дорозі' in sub.columns else 0
+    out['Потреба (шт.)']=sub['Потреба']
     out[f'Ціна ({cur})']=sub['Ціна_закупівлі'].round(2); out[f'РРЦ ({cur})']=sub['p_RRP'].round(2)
     out['Маржа %']=sub['Маржа_%']; out['⚠️ Підняти РРЦ']=sub['Підняти_РРЦ']
     out[f'Сума ({cur})']=sub['Сума'].round(2)
