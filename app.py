@@ -449,24 +449,39 @@ cfg={'Назва':st.column_config.TextColumn(width='large'),'ABC':st.column_con
      **{f'Маржа{k}':st.column_config.NumberColumn(format='%.1f %%') for k in [' %',' iH %',' VW %',' DSN %',' ATL %']},
      'Серед./міс.':st.column_config.NumberColumn(format='%.1f')}
 
-def show_tab(subset, sup=None):
+def show_tab(subset, sup=None, key_prefix='all'):
     if sup: subset=subset[subset['Постачальник']==sup]
     if not len(subset): st.info("Немає позицій"); return
-    st.dataframe(build_tbl(subset), use_container_width=True, hide_index=True, column_config=cfg)
+    only_need = st.checkbox("Тільки артикули з потребою (Потреба > 0)", value=True, key=f"need_{key_prefix}")
+    if only_need:
+        subset = subset[subset['Потреба'] > 0]
+    if not len(subset): st.info("Немає позицій з потребою"); return
+    tbl = build_tbl(subset)
+    st.dataframe(tbl, use_container_width=True, hide_index=True, column_config=cfg)
+    # Підсумковий рядок
+    total_row = {c: '' for c in tbl.columns}
+    total_row['Артикул'] = '**Підсумок**'
+    total_row['Потреба'] = int(subset['Потреба'].sum())
+    total_row[f'Сума ({cur})'] = round(subset['Сума'].sum(), 2)
+    st.dataframe(pd.DataFrame([total_row]), use_container_width=True, hide_index=True,
+                 column_config=cfg)
     st.markdown(f"**{subset['Сума'].sum():,.2f} {cur}** · {len(subset)} позицій · {int(subset['Потреба'].sum())} одиниць")
 
 n_low=int(df['Підняти_РРЦ'].sum()); n_miss=int((df['Постачальник']=='—').sum())
 tabs=st.tabs(["📋 Всі","🔵 iHerb","🟢 VitaWorld","🟡 DSN","🟣 AtletikVit",
               "💹 Порівняння цін",f"⚠️ Підняти РРЦ ({n_low})",f"❌ Не знайдено ({n_miss})"])
-with tabs[0]: show_tab(found)
-with tabs[1]: show_tab(found,'iHerb')
-with tabs[2]: show_tab(found,'VitaWorld')
-with tabs[3]: show_tab(found,'DSN')
-with tabs[4]: show_tab(found,'AtletikVit')
+with tabs[0]: show_tab(found, key_prefix='all')
+with tabs[1]: show_tab(found,'iHerb', key_prefix='ih')
+with tabs[2]: show_tab(found,'VitaWorld', key_prefix='vw')
+with tabs[3]: show_tab(found,'DSN', key_prefix='dsn')
+with tabs[4]: show_tab(found,'AtletikVit', key_prefix='atl')
 with tabs[5]:
     # Порівняння цін всіх постачальників
-    st.caption("Всі позиції де є хоча б 2 постачальники — порівняння цін і маржі")
+    st.caption("Всі позиції де є хоча б 1 постачальник — порівняння цін, РРЦ і маржі")
+    only_need_cmp = st.checkbox("Тільки артикули з потребою (Потреба > 0)", value=True, key="need_cmp")
     price_df = df[df[['eff_IH','eff_VW','eff_DSN','eff_ATL']].notna().sum(axis=1) >= 1].copy()
+    if only_need_cmp:
+        price_df = price_df[price_df['Потреба'] > 0]
     if len(price_df):
         cmp = pd.DataFrame()
         cmp['Артикул']        = price_df['Артикул_IH']
@@ -501,7 +516,16 @@ with tabs[5]:
             'Різниця min-max %': st.column_config.NumberColumn(format='%.1f %%'),
         }
         st.dataframe(cmp, use_container_width=True, hide_index=True, column_config=cmp_cfg)
-        st.markdown(f"**{len(cmp)} позицій**")
+        # Підсумковий рядок — сума за обраним постачальником (найкращим)
+        best_sum = price_df.apply(
+            lambda r: r['Ціна_закупівлі']*int(r['Потреба']) if pd.notna(r['Ціна_закупівлі']) and r['Потреба']>0 else 0,
+            axis=1).sum()
+        total_row = {c: '' for c in cmp.columns}
+        total_row['Артикул'] = '**Підсумок**'
+        total_row['Потреба'] = int(price_df['Потреба'].sum())
+        st.dataframe(pd.DataFrame([total_row]), use_container_width=True, hide_index=True, column_config=cmp_cfg)
+        st.markdown(f"**{len(cmp)} позицій** · Потреба разом: **{int(price_df['Потреба'].sum())} од.** · "
+                    f"Сума за найкращою ціною: **{best_sum:,.2f} {cur}**")
     else:
         st.info("Немає позицій з цінами постачальників")
 with tabs[6]:
