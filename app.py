@@ -500,11 +500,15 @@ with tabs[5]:
         cmp['Маржа DSN %']    = price_df['Маржа_DSN']
         cmp['Маржа ATL %']    = price_df['Маржа_ATL']
         cmp['✅ Найкраща']    = price_df['Постачальник']
-        cmp['Різниця min-max %'] = price_df.apply(
-            lambda r: round((max(filter(pd.notna,[r['eff_IH'],r['eff_VW'],r['eff_DSN'],r['eff_ATL']]+[0]))-
-                             min(filter(pd.notna,[r['eff_IH'],r['eff_VW'],r['eff_DSN'],r['eff_ATL']]+[999999])))/
-                             max(min(filter(pd.notna,[r['eff_IH'],r['eff_VW'],r['eff_DSN'],r['eff_ATL']]+[1])),1)*100,1)
-            if pd.notna(r['eff_IH']) or pd.notna(r['eff_VW']) or pd.notna(r['eff_DSN']) or pd.notna(r['eff_ATL']) else 0, axis=1)
+        def calc_diff_pct(r):
+            vals = [v for v in [r['eff_IH'], r['eff_VW'], r['eff_DSN'], r['eff_ATL']] if pd.notna(v)]
+            if len(vals) < 2:
+                return 0.0
+            mx, mn = max(vals), min(vals)
+            if mn <= 0:
+                return 0.0
+            return round((mx - mn) / mn * 100, 1)
+        cmp['Різниця min-max %'] = price_df.apply(calc_diff_pct, axis=1)
         cmp = cmp.sort_values('Різниця min-max %', ascending=False)
         cmp_cfg = {
             'Назва': st.column_config.TextColumn(width='large'),
@@ -598,11 +602,15 @@ def build_price_comparison_df():
     cmp['Маржа DSN %']        = price_df['Маржа_DSN']
     cmp['Маржа AtletikVit %'] = price_df['Маржа_ATL']
     cmp['Найкраща ціна у']    = price_df['Постачальник']
-    cmp['Різниця min-max %'] = price_df.apply(
-        lambda r: round((max(filter(pd.notna,[r['eff_IH'],r['eff_VW'],r['eff_DSN'],r['eff_ATL']]+[0]))-
-                         min(filter(pd.notna,[r['eff_IH'],r['eff_VW'],r['eff_DSN'],r['eff_ATL']]+[999999])))/
-                         max(min(filter(pd.notna,[r['eff_IH'],r['eff_VW'],r['eff_DSN'],r['eff_ATL']]+[1])),1)*100,1)
-        if pd.notna(r['eff_IH']) or pd.notna(r['eff_VW']) or pd.notna(r['eff_DSN']) or pd.notna(r['eff_ATL']) else 0, axis=1)
+    def calc_diff_pct(r):
+        vals = [v for v in [r['eff_IH'], r['eff_VW'], r['eff_DSN'], r['eff_ATL']] if pd.notna(v)]
+        if len(vals) < 2:
+            return 0.0
+        mx, mn = max(vals), min(vals)
+        if mn <= 0:
+            return 0.0
+        return round((mx - mn) / mn * 100, 1)
+    cmp['Різниця min-max %'] = price_df.apply(calc_diff_pct, axis=1)
     return cmp.sort_values('Різниця min-max %', ascending=False)
 
 def make_full():
