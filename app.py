@@ -220,18 +220,29 @@ with st.spinner("Обробка файлів..."):
         Залишок=('Залишок','sum'), В_дорозі=('В_дорозі','sum')).reset_index()
 
     # РРЦ
+    # РРЦ — новий формат файлу: sku / price_before_coefficient (USD), без дублікатів і дат
     raw_rrp = read_f(f_rrp); raw_rrp.columns = raw_rrp.columns.str.strip()
-    ar = find_col(raw_rrp,['артикул','sku']); dr = find_col(raw_rrp,['дата','period','період','date']); pr = find_col(raw_rrp,['цена','ціна','price'])
-    df_rrp = raw_rrp[[ar,dr,pr]].copy() if dr else raw_rrp[[ar,pr]].copy()
-    df_rrp.columns = ['Артикул_IH','Дата_РРЦ','РРЦ_UAH'] if dr else ['Артикул_IH','РРЦ_UAH']
-    df_rrp['Артикул_IH'] = df_rrp['Артикул_IH'].astype(str).str.strip()
-    df_rrp['РРЦ_UAH'] = pd.to_numeric(df_rrp['РРЦ_UAH'], errors='coerce')
-    if 'Дата_РРЦ' in df_rrp.columns:
-        df_rrp['Дата_РРЦ'] = pd.to_datetime(df_rrp['Дата_РРЦ'], errors='coerce')
-        df_rrp = df_rrp.sort_values('Дата_РРЦ').drop_duplicates('Артикул_IH', keep='last')
+    ar = find_col(raw_rrp, ['sku','артикул'])
+    pr = find_col(raw_rrp, ['price_before_coefficient'])
+    if not pr:  # запасний варіант якщо колонку перейменують/файл іншого типу
+        dr = find_col(raw_rrp, ['дата','period','період','date'])
+        pr = find_col(raw_rrp, ['ціна','цена','price','special_price'])
+        df_rrp = raw_rrp[[ar,dr,pr]].copy() if dr else raw_rrp[[ar,pr]].copy()
+        df_rrp.columns = ['Артикул_IH','Дата_РРЦ','РРЦ_USD'] if dr else ['Артикул_IH','РРЦ_USD']
+        df_rrp['Артикул_IH'] = df_rrp['Артикул_IH'].astype(str).str.strip()
+        df_rrp['РРЦ_USD'] = pd.to_numeric(df_rrp['РРЦ_USD'], errors='coerce')
+        if 'Дата_РРЦ' in df_rrp.columns:
+            df_rrp['Дата_РРЦ'] = pd.to_datetime(df_rrp['Дата_РРЦ'], errors='coerce')
+            df_rrp = df_rrp.sort_values('Дата_РРЦ').drop_duplicates('Артикул_IH', keep='last')
+        else:
+            df_rrp = df_rrp.drop_duplicates('Артикул_IH', keep='last')
+        df_rrp = df_rrp[['Артикул_IH','РРЦ_USD']]
     else:
+        df_rrp = raw_rrp[[ar, pr]].copy()
+        df_rrp.columns = ['Артикул_IH','РРЦ_USD']
+        df_rrp['Артикул_IH'] = df_rrp['Артикул_IH'].astype(str).str.strip()
+        df_rrp['РРЦ_USD'] = pd.to_numeric(df_rrp['РРЦ_USD'], errors='coerce')
         df_rrp = df_rrp.drop_duplicates('Артикул_IH', keep='last')
-    df_rrp = df_rrp[['Артикул_IH','РРЦ_UAH']]
 
     # iHerb прайс
     raw_ih = read_f(f_ih); raw_ih.columns = raw_ih.columns.str.strip()
@@ -352,11 +363,11 @@ if 'Назва_IH' in df.columns:
 # Currency
 if disp_cur=='UAH':
     df['p_IH']=df['Ціна_IH_USD']*usd_rate; df['p_VW']=df['Ціна_VW_USD']*usd_rate
-    df['p_DSN']=df['Ціна_DSN_UAH']; df['p_RRP']=df['РРЦ_UAH']
+    df['p_DSN']=df['Ціна_DSN_UAH']; df['p_RRP']=df['РРЦ_USD']*usd_rate
     df['p_ATL']=df['Ціна_ATL_USD']*usd_rate
 else:
     df['p_IH']=df['Ціна_IH_USD']; df['p_VW']=df['Ціна_VW_USD']
-    df['p_DSN']=df['Ціна_DSN_UAH']/usd_rate; df['p_RRP']=df['РРЦ_UAH']/usd_rate
+    df['p_DSN']=df['Ціна_DSN_UAH']/usd_rate; df['p_RRP']=df['РРЦ_USD']
     df['p_ATL']=df['Ціна_ATL_USD']
 
 # Availability
