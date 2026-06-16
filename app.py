@@ -288,15 +288,22 @@ with st.spinner("Обробка файлів..."):
         df_dsn_p['Артикул_IH'] = df_dsn_p['Штрихкод_DSN'].apply(lambda x: bc_map.get(str(x).strip()) if pd.notna(x) else None)
     else: df_dsn_p['Артикул_IH'] = None
 
-    # AtletikVit
-    raw_atl = read_f(f_atl)
-    raw_atl.columns = raw_atl.columns.str.strip()
+    # AtletikVit (заголовки таблиці на 2-му рядку файлу — header=1)
+    if f_atl.name.endswith('.csv'):
+        raw_atl = pd.read_csv(f_atl, header=1)
+    else:
+        eng = 'xlrd' if f_atl.name.endswith('.xls') else 'openpyxl'
+        raw_atl = pd.read_excel(f_atl, header=1, engine=eng)
+    raw_atl.columns = raw_atl.columns.astype(str).str.strip()
     a_atl  = find_col(raw_atl, ['артикул'])
     p_atl  = find_col(raw_atl, ['ціна зі знижкою','цена со скидкой','discount'])
     if not p_atl: p_atl = find_col(raw_atl, ['ціна','цена','price'])
     bc_atl = find_col(raw_atl, ['штрихкод','barcode','ean','upc'])
     qty_atl= find_col(raw_atl, ['кількість на складі','количество','stock'])
     nm_atl = find_col(raw_atl, ['назва','название','name'])
+    if not a_atl or not p_atl:
+        st.error(f"❌ AtletikVit: не вдалось знайти колонки. Знайдені колонки файлу: {list(raw_atl.columns)}")
+        st.stop()
     df_atl_p = raw_atl[[a_atl, p_atl]].copy()
     df_atl_p.columns = ['Артикул_ATL','Ціна_ATL_USD']
     df_atl_p['Артикул_ATL']   = df_atl_p['Артикул_ATL'].astype(str).str.strip()
