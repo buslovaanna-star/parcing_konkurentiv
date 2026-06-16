@@ -189,11 +189,16 @@ with c5: f_vw     = st.file_uploader("📗 Прайс VitaWorld", type=["xls","x
 with c6: f_dsn    = st.file_uploader("📙 Прайс DSN", type=["xlsx","xls","csv"])
 with c7: f_atl    = st.file_uploader("📕 Прайс AtletikVit", type=["xlsx","xls","csv"])
 
-missing = [n for n,f in [("Сайт",f_site),("Магазини",f_stores),("РРЦ",f_rrp),
-                          ("iHerb",f_ih),("VitaWorld",f_vw),("DSN",f_dsn),("AtletikVit",f_atl)] if not f]
-if missing:
-    st.info(f"Завантажте всі 6 файлів. Ще не завантажено: **{', '.join(missing)}**")
+required_missing = [n for n,f in [("Сайт",f_site),("Магазини",f_stores)] if not f]
+if required_missing:
+    st.info(f"Завантажте обов'язкові файли продажів. Ще не завантажено: **{', '.join(required_missing)}**")
     st.stop()
+
+optional_missing = [n for n,f in [("РРЦ",f_rrp),("iHerb",f_ih),("VitaWorld",f_vw),
+                                   ("DSN",f_dsn),("AtletikVit",f_atl)] if not f]
+if optional_missing:
+    st.warning(f"⚠️ Звіт сформується без: **{', '.join(optional_missing)}**. "
+               f"Маржа/порівняння для цих джерел будуть недоступні, поки файли не завантажені.")
 
 # ── Parse ─────────────────────────────────────────────────────────
 with st.spinner("Обробка файлів..."):
@@ -221,114 +226,129 @@ with st.spinner("Обробка файлів..."):
 
     # РРЦ
     # РРЦ — новий формат файлу: sku / price_before_coefficient (USD), без дублікатів і дат
-    raw_rrp = read_f(f_rrp); raw_rrp.columns = raw_rrp.columns.str.strip()
-    ar = find_col(raw_rrp, ['sku','артикул'])
-    pr = find_col(raw_rrp, ['price_before_coefficient'])
-    if not pr:  # запасний варіант якщо колонку перейменують/файл іншого типу
-        dr = find_col(raw_rrp, ['дата','period','період','date'])
-        pr = find_col(raw_rrp, ['ціна','цена','price','special_price'])
-        df_rrp = raw_rrp[[ar,dr,pr]].copy() if dr else raw_rrp[[ar,pr]].copy()
-        df_rrp.columns = ['Артикул_IH','Дата_РРЦ','РРЦ_USD'] if dr else ['Артикул_IH','РРЦ_USD']
-        df_rrp['Артикул_IH'] = df_rrp['Артикул_IH'].astype(str).str.strip()
-        df_rrp['РРЦ_USD'] = pd.to_numeric(df_rrp['РРЦ_USD'], errors='coerce')
-        if 'Дата_РРЦ' in df_rrp.columns:
-            df_rrp['Дата_РРЦ'] = pd.to_datetime(df_rrp['Дата_РРЦ'], errors='coerce')
-            df_rrp = df_rrp.sort_values('Дата_РРЦ').drop_duplicates('Артикул_IH', keep='last')
+    if f_rrp is not None:
+        raw_rrp = read_f(f_rrp); raw_rrp.columns = raw_rrp.columns.str.strip()
+        ar = find_col(raw_rrp, ['sku','артикул'])
+        pr = find_col(raw_rrp, ['price_before_coefficient'])
+        if not pr:  # запасний варіант якщо колонку перейменують/файл іншого типу
+            dr = find_col(raw_rrp, ['дата','period','період','date'])
+            pr = find_col(raw_rrp, ['ціна','цена','price','special_price'])
+            df_rrp = raw_rrp[[ar,dr,pr]].copy() if dr else raw_rrp[[ar,pr]].copy()
+            df_rrp.columns = ['Артикул_IH','Дата_РРЦ','РРЦ_USD'] if dr else ['Артикул_IH','РРЦ_USD']
+            df_rrp['Артикул_IH'] = df_rrp['Артикул_IH'].astype(str).str.strip()
+            df_rrp['РРЦ_USD'] = pd.to_numeric(df_rrp['РРЦ_USD'], errors='coerce')
+            if 'Дата_РРЦ' in df_rrp.columns:
+                df_rrp['Дата_РРЦ'] = pd.to_datetime(df_rrp['Дата_РРЦ'], errors='coerce')
+                df_rrp = df_rrp.sort_values('Дата_РРЦ').drop_duplicates('Артикул_IH', keep='last')
+            else:
+                df_rrp = df_rrp.drop_duplicates('Артикул_IH', keep='last')
+            df_rrp = df_rrp[['Артикул_IH','РРЦ_USD']]
         else:
+            df_rrp = raw_rrp[[ar, pr]].copy()
+            df_rrp.columns = ['Артикул_IH','РРЦ_USD']
+            df_rrp['Артикул_IH'] = df_rrp['Артикул_IH'].astype(str).str.strip()
+            df_rrp['РРЦ_USD'] = pd.to_numeric(df_rrp['РРЦ_USD'], errors='coerce')
             df_rrp = df_rrp.drop_duplicates('Артикул_IH', keep='last')
-        df_rrp = df_rrp[['Артикул_IH','РРЦ_USD']]
     else:
-        df_rrp = raw_rrp[[ar, pr]].copy()
-        df_rrp.columns = ['Артикул_IH','РРЦ_USD']
-        df_rrp['Артикул_IH'] = df_rrp['Артикул_IH'].astype(str).str.strip()
-        df_rrp['РРЦ_USD'] = pd.to_numeric(df_rrp['РРЦ_USD'], errors='coerce')
-        df_rrp = df_rrp.drop_duplicates('Артикул_IH', keep='last')
+        df_rrp = pd.DataFrame(columns=['Артикул_IH','РРЦ_USD'])
 
     # iHerb прайс
-    raw_ih = read_f(f_ih); raw_ih.columns = raw_ih.columns.str.strip()
-    a_ih = find_col(raw_ih,['артикул','sku','article']); p_ih = find_col(raw_ih,['ціна','цена','price']); v_ih = find_col(raw_ih,['наявн','налич','availab'])
-    df_ih_p = raw_ih[[a_ih,p_ih]].copy(); df_ih_p.columns = ['Артикул_IH','Ціна_IH_USD']
-    df_ih_p['Наявність_IH'] = raw_ih[v_ih].values if v_ih else 'Є в наявності'
-    df_ih_p['Артикул_IH'] = df_ih_p['Артикул_IH'].astype(str).str.strip()
-    df_ih_p['Ціна_IH_USD'] = pd.to_numeric(df_ih_p['Ціна_IH_USD'], errors='coerce')
-    df_ih_p = df_ih_p.drop_duplicates('Артикул_IH')
-    nm_ih = find_col(raw_ih,['назв','name','номенклатура'])
-    if nm_ih:
-        # Правильний merge по артикулу - без зсуву після drop_duplicates
-        names_df = raw_ih[[a_ih, nm_ih]].copy()
-        names_df.columns = ['Артикул_IH','Назва_IH']
-        names_df['Артикул_IH'] = names_df['Артикул_IH'].astype(str).str.strip()
-        names_df = names_df.drop_duplicates('Артикул_IH', keep='first')
-        df_ih_p = df_ih_p.merge(names_df, on='Артикул_IH', how='left')
+    if f_ih is not None:
+        raw_ih = read_f(f_ih); raw_ih.columns = raw_ih.columns.str.strip()
+        a_ih = find_col(raw_ih,['артикул','sku','article']); p_ih = find_col(raw_ih,['ціна','цена','price']); v_ih = find_col(raw_ih,['наявн','налич','availab'])
+        df_ih_p = raw_ih[[a_ih,p_ih]].copy(); df_ih_p.columns = ['Артикул_IH','Ціна_IH_USD']
+        df_ih_p['Наявність_IH'] = raw_ih[v_ih].values if v_ih else 'Є в наявності'
+        df_ih_p['Артикул_IH'] = df_ih_p['Артикул_IH'].astype(str).str.strip()
+        df_ih_p['Ціна_IH_USD'] = pd.to_numeric(df_ih_p['Ціна_IH_USD'], errors='coerce')
+        df_ih_p = df_ih_p.drop_duplicates('Артикул_IH')
+        nm_ih = find_col(raw_ih,['назв','name','номенклатура'])
+        if nm_ih:
+            # Правильний merge по артикулу - без зсуву після drop_duplicates
+            names_df = raw_ih[[a_ih, nm_ih]].copy()
+            names_df.columns = ['Артикул_IH','Назва_IH']
+            names_df['Артикул_IH'] = names_df['Артикул_IH'].astype(str).str.strip()
+            names_df = names_df.drop_duplicates('Артикул_IH', keep='first')
+            df_ih_p = df_ih_p.merge(names_df, on='Артикул_IH', how='left')
+    else:
+        df_ih_p = pd.DataFrame(columns=['Артикул_IH','Ціна_IH_USD','Наявність_IH','Назва_IH'])
 
     # VitaWorld
-    try:
-        raw_vw = pd.read_excel(f_vw, header=None, engine='xlrd' if f_vw.name.endswith('.xls') else 'openpyxl')
-        vw_rows = []
-        for _, row in raw_vw.iterrows():
-            art = row[2]
-            if pd.notna(art) and isinstance(art,str) and art.strip() and art.strip()!='Артикул':
-                bc = row[10] if len(row)>10 else None
-                bc_s = ''
-                if pd.notna(bc):
-                    bc_raw = str(bc).strip()
-                    # Беремо лише числові штрихкоди EAN/UPC (не ASIN типу X000QWJYKZ)
-                    digits_only = bc_raw.replace('.','').replace(',','')
-                    if digits_only.isdigit() and 10 <= len(digits_only) <= 14:
-                        try: bc_s = str(int(float(bc_raw)))
-                        except: bc_s = ''
-                    else:
-                        bc_s = ''  # пропускаємо нечислові коди''
-                vw_rows.append({'Артикул_VW':art.strip(), 'Назва_VW': str(row[3]).strip() if pd.notna(row[3]) else '',
-                                'Ціна_VW_USD':pd.to_numeric(row[5],errors='coerce'), 'Штрихкод':bc_s})
-        df_vw_p = pd.DataFrame(vw_rows)
-        df_vw_p['Артикул_IH'] = df_vw_p['Штрихкод'].apply(lambda x: bc_map.get(str(x).strip()) if x else None)
-    except Exception as e:
-        st.warning(f"VitaWorld помилка: {e}"); df_vw_p = pd.DataFrame(columns=['Артикул_VW','Назва_VW','Ціна_VW_USD','Штрихкод','Артикул_IH'])
+    if f_vw is not None:
+        try:
+            raw_vw = pd.read_excel(f_vw, header=None, engine='xlrd' if f_vw.name.endswith('.xls') else 'openpyxl')
+            vw_rows = []
+            for _, row in raw_vw.iterrows():
+                art = row[2]
+                if pd.notna(art) and isinstance(art,str) and art.strip() and art.strip()!='Артикул':
+                    bc = row[10] if len(row)>10 else None
+                    bc_s = ''
+                    if pd.notna(bc):
+                        bc_raw = str(bc).strip()
+                        # Беремо лише числові штрихкоди EAN/UPC (не ASIN типу X000QWJYKZ)
+                        digits_only = bc_raw.replace('.','').replace(',','')
+                        if digits_only.isdigit() and 10 <= len(digits_only) <= 14:
+                            try: bc_s = str(int(float(bc_raw)))
+                            except: bc_s = ''
+                        else:
+                            bc_s = ''  # пропускаємо нечислові коди''
+                    vw_rows.append({'Артикул_VW':art.strip(), 'Назва_VW': str(row[3]).strip() if pd.notna(row[3]) else '',
+                                    'Ціна_VW_USD':pd.to_numeric(row[5],errors='coerce'), 'Штрихкод':bc_s})
+            df_vw_p = pd.DataFrame(vw_rows)
+            df_vw_p['Артикул_IH'] = df_vw_p['Штрихкод'].apply(lambda x: bc_map.get(str(x).strip()) if x else None)
+        except Exception as e:
+            st.warning(f"VitaWorld помилка: {e}"); df_vw_p = pd.DataFrame(columns=['Артикул_VW','Назва_VW','Ціна_VW_USD','Штрихкод','Артикул_IH'])
+    else:
+        df_vw_p = pd.DataFrame(columns=['Артикул_VW','Назва_VW','Ціна_VW_USD','Штрихкод','Артикул_IH'])
 
     # DSN
-    raw_dsn = read_f(f_dsn); raw_dsn.columns = raw_dsn.columns.str.strip()
-    a_dsn = find_col(raw_dsn,['артикул']); p_dsn = find_col(raw_dsn,['цена','ціна','price'])
-    av_dsn = find_col(raw_dsn,['наличие','наявн']); desc_c = find_col(raw_dsn,['описание товара (ua)','опис товара'])
-    df_dsn_p = raw_dsn[[a_dsn,p_dsn]].copy(); df_dsn_p.columns = ['Артикул_DSN','Ціна_DSN_UAH']
-    if av_dsn: df_dsn_p['Наявність_DSN'] = raw_dsn[av_dsn].values
-    df_dsn_p['Артикул_DSN'] = df_dsn_p['Артикул_DSN'].astype(str).str.strip()
-    df_dsn_p['Ціна_DSN_UAH'] = pd.to_numeric(df_dsn_p['Ціна_DSN_UAH'], errors='coerce')
-    if desc_c:
-        df_dsn_p['Штрихкод_DSN'] = raw_dsn[desc_c].apply(extract_bc)
-        df_dsn_p['Артикул_IH'] = df_dsn_p['Штрихкод_DSN'].apply(lambda x: bc_map.get(str(x).strip()) if pd.notna(x) else None)
-    else: df_dsn_p['Артикул_IH'] = None
+    if f_dsn is not None:
+        raw_dsn = read_f(f_dsn); raw_dsn.columns = raw_dsn.columns.str.strip()
+        a_dsn = find_col(raw_dsn,['артикул']); p_dsn = find_col(raw_dsn,['цена','ціна','price'])
+        av_dsn = find_col(raw_dsn,['наличие','наявн']); desc_c = find_col(raw_dsn,['описание товара (ua)','опис товара'])
+        df_dsn_p = raw_dsn[[a_dsn,p_dsn]].copy(); df_dsn_p.columns = ['Артикул_DSN','Ціна_DSN_UAH']
+        if av_dsn: df_dsn_p['Наявність_DSN'] = raw_dsn[av_dsn].values
+        df_dsn_p['Артикул_DSN'] = df_dsn_p['Артикул_DSN'].astype(str).str.strip()
+        df_dsn_p['Ціна_DSN_UAH'] = pd.to_numeric(df_dsn_p['Ціна_DSN_UAH'], errors='coerce')
+        if desc_c:
+            df_dsn_p['Штрихкод_DSN'] = raw_dsn[desc_c].apply(extract_bc)
+            df_dsn_p['Артикул_IH'] = df_dsn_p['Штрихкод_DSN'].apply(lambda x: bc_map.get(str(x).strip()) if pd.notna(x) else None)
+        else: df_dsn_p['Артикул_IH'] = None
+    else:
+        df_dsn_p = pd.DataFrame(columns=['Артикул_DSN','Ціна_DSN_UAH','Наявність_DSN','Артикул_IH'])
 
     # AtletikVit (заголовки таблиці на 2-му рядку файлу — header=1)
-    if f_atl.name.endswith('.csv'):
-        raw_atl = pd.read_csv(f_atl, header=1)
+    if f_atl is not None:
+        if f_atl.name.endswith('.csv'):
+            raw_atl = pd.read_csv(f_atl, header=1)
+        else:
+            eng = 'xlrd' if f_atl.name.endswith('.xls') else 'openpyxl'
+            raw_atl = pd.read_excel(f_atl, header=1, engine=eng)
+        raw_atl.columns = raw_atl.columns.astype(str).str.strip()
+        a_atl  = find_col(raw_atl, ['артикул'])
+        p_atl  = find_col(raw_atl, ['ціна зі знижкою','цена со скидкой','discount'])
+        if not p_atl: p_atl = find_col(raw_atl, ['ціна','цена','price'])
+        bc_atl = find_col(raw_atl, ['штрихкод','barcode','ean','upc'])
+        qty_atl= find_col(raw_atl, ['кількість на складі','количество','stock'])
+        nm_atl = find_col(raw_atl, ['назва','название','name'])
+        if not a_atl or not p_atl:
+            st.error(f"❌ AtletikVit: не вдалось знайти колонки. Знайдені колонки файлу: {list(raw_atl.columns)}")
+            st.stop()
+        df_atl_p = raw_atl[[a_atl, p_atl]].copy()
+        df_atl_p.columns = ['Артикул_ATL','Ціна_ATL_USD']
+        df_atl_p['Артикул_ATL']   = df_atl_p['Артикул_ATL'].astype(str).str.strip()
+        df_atl_p['Ціна_ATL_USD']  = pd.to_numeric(df_atl_p['Ціна_ATL_USD'], errors='coerce')
+        if nm_atl:  df_atl_p['Назва_ATL']     = raw_atl[nm_atl].values
+        if qty_atl: df_atl_p['Кількість_ATL'] = pd.to_numeric(raw_atl[qty_atl], errors='coerce').fillna(0)
+        else:       df_atl_p['Кількість_ATL'] = 0
+        if bc_atl:
+            df_atl_p['Штрихкод_ATL'] = raw_atl[bc_atl].apply(
+                lambda x: str(int(float(x))) if pd.notna(x) else '')
+            df_atl_p['Артикул_IH'] = df_atl_p['Штрихкод_ATL'].apply(
+                lambda x: bc_map.get(str(x).strip()) if x else None)
+        else:
+            df_atl_p['Артикул_IH'] = None
     else:
-        eng = 'xlrd' if f_atl.name.endswith('.xls') else 'openpyxl'
-        raw_atl = pd.read_excel(f_atl, header=1, engine=eng)
-    raw_atl.columns = raw_atl.columns.astype(str).str.strip()
-    a_atl  = find_col(raw_atl, ['артикул'])
-    p_atl  = find_col(raw_atl, ['ціна зі знижкою','цена со скидкой','discount'])
-    if not p_atl: p_atl = find_col(raw_atl, ['ціна','цена','price'])
-    bc_atl = find_col(raw_atl, ['штрихкод','barcode','ean','upc'])
-    qty_atl= find_col(raw_atl, ['кількість на складі','количество','stock'])
-    nm_atl = find_col(raw_atl, ['назва','название','name'])
-    if not a_atl or not p_atl:
-        st.error(f"❌ AtletikVit: не вдалось знайти колонки. Знайдені колонки файлу: {list(raw_atl.columns)}")
-        st.stop()
-    df_atl_p = raw_atl[[a_atl, p_atl]].copy()
-    df_atl_p.columns = ['Артикул_ATL','Ціна_ATL_USD']
-    df_atl_p['Артикул_ATL']   = df_atl_p['Артикул_ATL'].astype(str).str.strip()
-    df_atl_p['Ціна_ATL_USD']  = pd.to_numeric(df_atl_p['Ціна_ATL_USD'], errors='coerce')
-    if nm_atl:  df_atl_p['Назва_ATL']     = raw_atl[nm_atl].values
-    if qty_atl: df_atl_p['Кількість_ATL'] = pd.to_numeric(raw_atl[qty_atl], errors='coerce').fillna(0)
-    else:       df_atl_p['Кількість_ATL'] = 0
-    if bc_atl:
-        df_atl_p['Штрихкод_ATL'] = raw_atl[bc_atl].apply(
-            lambda x: str(int(float(x))) if pd.notna(x) else '')
-        df_atl_p['Артикул_IH'] = df_atl_p['Штрихкод_ATL'].apply(
-            lambda x: bc_map.get(str(x).strip()) if x else None)
-    else:
-        df_atl_p['Артикул_IH'] = None
+        df_atl_p = pd.DataFrame(columns=['Артикул_ATL','Ціна_ATL_USD','Назва_ATL','Кількість_ATL','Артикул_IH'])
 
 # ── Demand ────────────────────────────────────────────────────────
 df = df_sales.merge(df_stock, on='Артикул_IH', how='left')
