@@ -540,6 +540,14 @@ with tabs[7]:
 # ── Export ────────────────────────────────────────────────────────
 st.markdown('<div class="sh"><div class="dot" style="background:#22c55e"></div><h3>Експорт замовлень</h3></div>', unsafe_allow_html=True)
 
+def add_autofilter(ws, n_cols, n_rows):
+    """Додає фільтри (випадаючі стрілки) на заголовки колонок Excel-листа."""
+    from openpyxl.utils import get_column_letter
+    last_col = get_column_letter(n_cols)
+    ws.auto_filter.ref = f"A1:{last_col}{n_rows}"
+    # Закріплюємо заголовок щоб фільтри завжди були видимі при скролі
+    ws.freeze_panes = "A2"
+
 def sup_sheet(writer, sup, data):
     sub=data[data['Постачальник']==sup]
     if not len(sub): return
@@ -564,8 +572,38 @@ def sup_sheet(writer, sup, data):
             if is_low:
                 for col_i in range(1, len(out.columns)+1):
                     ws_out.cell(row=row_i, column=col_i).fill = red_fill
+        add_autofilter(ws_out, len(out.columns), len(out)+1)
     except Exception:
         pass
+
+def build_price_comparison_df():
+    """Будує датафрейм порівняння цін усіх постачальників + РРЦ для експорту."""
+    price_df = df[df[['eff_IH','eff_VW','eff_DSN','eff_ATL']].notna().sum(axis=1) >= 1].copy()
+    if not len(price_df):
+        return pd.DataFrame()
+    cmp = pd.DataFrame()
+    cmp['Артикул']            = price_df['Артикул_IH']
+    cmp['Назва']              = price_df['Назва']
+    cmp['ABC']                = price_df['ABC']
+    cmp['Залишок']            = price_df['Залишок'].astype(int)
+    cmp['В дорозі']           = price_df['В_дорозі'].astype(int) if 'В_дорозі' in price_df.columns else 0
+    cmp['Потреба']            = price_df['Потреба']
+    cmp[f'iHerb ({cur})']     = price_df['eff_IH'].round(2)
+    cmp[f'VitaWorld ({cur})'] = price_df['eff_VW'].round(2)
+    cmp[f'DSN ({cur})']       = price_df['eff_DSN'].round(2)
+    cmp[f'AtletikVit ({cur})']= price_df['eff_ATL'].round(2)
+    cmp[f'РРЦ ({cur})']       = price_df['p_RRP'].round(2)
+    cmp['Маржа iHerb %']      = price_df['Маржа_IH']
+    cmp['Маржа VitaWorld %']  = price_df['Маржа_VW']
+    cmp['Маржа DSN %']        = price_df['Маржа_DSN']
+    cmp['Маржа AtletikVit %'] = price_df['Маржа_ATL']
+    cmp['Найкраща ціна у']    = price_df['Постачальник']
+    cmp['Різниця min-max %'] = price_df.apply(
+        lambda r: round((max(filter(pd.notna,[r['eff_IH'],r['eff_VW'],r['eff_DSN'],r['eff_ATL']]+[0]))-
+                         min(filter(pd.notna,[r['eff_IH'],r['eff_VW'],r['eff_DSN'],r['eff_ATL']]+[999999])))/
+                         max(min(filter(pd.notna,[r['eff_IH'],r['eff_VW'],r['eff_DSN'],r['eff_ATL']]+[1])),1)*100,1)
+        if pd.notna(r['eff_IH']) or pd.notna(r['eff_VW']) or pd.notna(r['eff_DSN']) or pd.notna(r['eff_ATL']) else 0, axis=1)
+    return cmp.sort_values('Різниця min-max %', ascending=False)
 
 def make_full():
     buf=io.BytesIO()
@@ -577,17 +615,37 @@ def make_full():
                if found[found['Постачальник']==s]['Маржа_%'].notna().any() else None}
               for s in ['iHerb','VitaWorld','DSN','AtletikVit'] if len(found[found['Постачальник']==s])]
         pd.DataFrame(rows).to_excel(w,index=False,sheet_name='Зведення')
+
+        # Лист порівняння цін
+        cmp = build_price_comparison_df()
+        if len(cmp):
+            cmp.to_excel(w, index=False, sheet_name='Порівняння цін')
+            try:
+                add_autofilter(w.sheets['Порівняння цін'], len(cmp.columns), len(cmp)+1)
+            except Exception:
+                pass
+
         for s in ['iHerb','VitaWorld','DSN','AtletikVit']: sup_sheet(w,s,found)
         low_df=df[df['Підняти_РРЦ']]
         if len(low_df):
-            pd.DataFrame({'Артикул':low_df['Артикул_IH'],'Назва':low_df['Назва'],
+            low_out = pd.DataFrame({'Артикул':low_df['Артикул_IH'],'Назва':low_df['Назва'],
                           'Постачальник':low_df['Постачальник'],
                           f'Ціна ({cur})':low_df['Ціна_закупівлі'].round(2),
                           f'РРЦ ({cur})':low_df['p_RRP'].round(2),'Маржа %':low_df['Маржа_%'],
                           f'Різниця ({cur})':((low_df['p_RRP']-low_df['Ціна_закупівлі'])*-1).round(2)
-                          }).to_excel(w,index=False,sheet_name='⚠️ Підняти РРЦ')
+                          })
+            low_out.to_excel(w,index=False,sheet_name='⚠️ Підняти РРЦ')
+            try:
+                add_autofilter(w.sheets['⚠️ Підняти РРЦ'], len(low_out.columns), len(low_out)+1)
+            except Exception:
+                pass
         miss2=df[df['Постачальник']=='—'][['Артикул_IH','Назва','ABC','Продано_всього','Залишок']]
-        if len(miss2): miss2.to_excel(w,index=False,sheet_name='Не знайдено')
+        if len(miss2):
+            miss2.to_excel(w,index=False,sheet_name='Не знайдено')
+            try:
+                add_autofilter(w.sheets['Не знайдено'], len(miss2.columns), len(miss2)+1)
+            except Exception:
+                pass
     return buf.getvalue()
 
 def make_sup_xlsx(sup):
