@@ -530,7 +530,7 @@ with tabs[5]:
         st.info("Немає позицій з цінами постачальників")
 with tabs[6]:
     low=df[df['Підняти_РРЦ']]
-    if len(low): show_tab(low); st.warning(f"⚠️ {len(low)} позицій: маржа нижче {margin_min}%. Розгляньте підняття РРЦ або зміну постачальника.")
+    if len(low): show_tab(low, key_prefix='low'); st.warning(f"⚠️ {len(low)} позицій: маржа нижче {margin_min}%. Розгляньте підняття РРЦ або зміну постачальника.")
     else: st.success(f"✅ Всі позиції з маржею ≥ {margin_min}%")
 with tabs[7]:
     miss=df[df['Постачальник']=='—'][['Артикул_IH','Назва','ABC','Продано_всього','Залишок']]
