@@ -699,13 +699,58 @@ with tabs[8]:
 # ── Export ────────────────────────────────────────────────────────
 st.markdown('<div class="sh"><div class="dot" style="background:#22c55e"></div><h3>Експорт замовлень</h3></div>', unsafe_allow_html=True)
 
-def add_autofilter(ws, n_cols, n_rows):
-    """Додає фільтри (випадаючі стрілки) на заголовки колонок Excel-листа."""
+def make_excel_table(ws, n_cols, n_data_rows, table_name, sum_cols=None, total_label_col=1):
+    """Перетворює діапазон на справжню Excel-таблицю (Format as Table) з Total Row:
+    — заголовок і смуги керуються вбудованим стилем Excel (TableStyleMedium9)
+    — фільтри вбудовані в заголовок автоматично
+    — Total Row завжди видимий і не зникає при фільтрації, формула SUBTOTAL
+      перераховує суму лише по видимих (невідфільтрованих) рядках
+    — ручне пряме форматування комірок (напр. червоний fill) має пріоритет
+      над стилем таблиці й не перезаписується
+
+    sum_cols: список 1-based номерів колонок, де в Total Row ставимо SUM-формулу.
+    total_label_col: 1-based номер колонки, де буде підпис 'Підсумок'.
+    Повертає індекс рядка Total Row (1-based, з урахуванням заголовка).
+    """
     from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.table import Table, TableStyleInfo
+    import re as _re
+
+    total_row_idx = n_data_rows + 2  # 1 за заголовок + 1 за 1-індексацію
     last_col = get_column_letter(n_cols)
-    ws.auto_filter.ref = f"A1:{last_col}{n_rows}"
-    # Закріплюємо заголовок щоб фільтри завжди були видимі при скролі
+    ref = f"A1:{last_col}{total_row_idx}"
+
+    safe_name = "Tbl_" + _re.sub(r'[^A-Za-z0-9_]', '_', table_name)
+
+    ws.cell(row=total_row_idx, column=total_label_col, value="Підсумок")
+    sum_cols = sum_cols or []
+    for col_i in sum_cols:
+        col_letter = get_column_letter(col_i)
+        ws.cell(row=total_row_idx, column=col_i,
+                value=f"=SUBTOTAL(109,{col_letter}2:{col_letter}{n_data_rows+1})")
+
+    style = TableStyleInfo(name="TableStyleMedium9", showFirstColumn=False,
+                            showLastColumn=False, showRowStripes=True, showColumnStripes=False)
+    tbl = Table(displayName=safe_name, ref=ref)
+    tbl.tableStyleInfo = style
+    tbl.totalsRowShown = True
+    tbl.totalsRowCount = 1
+    try:
+        ws.add_table(tbl)
+    except Exception:
+        ws.auto_filter.ref = f"A1:{last_col}{n_data_rows+1}"
     ws.freeze_panes = "A2"
+    return total_row_idx
+
+def highlight_rows(ws, n_cols, row_indices, color='FFCCCC'):
+    """Заливає вказані рядки (1-based, з урахуванням заголовка) кольором.
+    Має пріоритет над стилем Excel-таблиці — пряме форматування комірки
+    в Excel завжди переважає над стилем таблиці."""
+    from openpyxl.styles import PatternFill
+    fill = PatternFill('solid', start_color=color, fgColor=color)
+    for row_i in row_indices:
+        for col_i in range(1, n_cols+1):
+            ws.cell(row=row_i, column=col_i).fill = fill
 
 def sup_sheet(writer, sup, data):
     sub=data[(data['Постачальник']==sup) & (data['Потреба']>0)]
@@ -722,31 +767,22 @@ def sup_sheet(writer, sup, data):
     out['Маржа %']=sub['Маржа_%']; out['⚠️ Підняти РРЦ']=sub['Підняти_РРЦ']
     out[f'Сума ({cur})']=sub['Сума'].round(2)
     n_data_rows = len(out)
-    # Підсумковий рядок: сума потреби та сума замовлення
-    total_row = {c: '' for c in out.columns}
-    total_row['Артикул (iHerb)'] = 'ПІДСУМОК'
-    total_row['Потреба (шт.)'] = int(out['Потреба (шт.)'].sum())
-    total_row[f'Сума ({cur})'] = round(out[f'Сума ({cur})'].sum(), 2)
-    out = pd.concat([out, pd.DataFrame([total_row])], ignore_index=True)
     out.to_excel(writer, index=False, sheet_name=sup)
-    # Червона підсвітка рядків де треба підняти РРЦ + виділення підсумкового рядка
     try:
-        from openpyxl.styles import PatternFill, Font
         ws_out = writer.sheets[sup]
-        red_fill = PatternFill('solid', start_color='FFCCCC', fgColor='FFCCCC')
-        bold_fill = PatternFill('solid', start_color='E8E8E8', fgColor='E8E8E8')
         raise_rrp = sub['Підняти_РРЦ'].values
-        for row_i, is_low in enumerate(raise_rrp, start=2):
-            if is_low:
-                for col_i in range(1, len(out.columns)+1):
-                    ws_out.cell(row=row_i, column=col_i).fill = red_fill
-        # Підсумковий рядок жирним і сірим фоном
-        total_row_idx = n_data_rows + 2  # +2: 1 за заголовок, 1 за 1-індексацію Excel
-        for col_i in range(1, len(out.columns)+1):
-            c = ws_out.cell(row=total_row_idx, column=col_i)
-            c.fill = bold_fill
-            c.font = Font(bold=True)
-        add_autofilter(ws_out, len(out.columns), n_data_rows+1)
+        red_rows = {ri for ri, is_low in enumerate(raise_rrp, start=2) if is_low}
+
+        # Колонки для SUM у Total Row: "Потреба (шт.)" та "Сума (...)"
+        potreba_col = list(out.columns).index('Потреба (шт.)') + 1
+        suma_col    = list(out.columns).index(f'Сума ({cur})') + 1
+
+        make_excel_table(ws_out, len(out.columns), n_data_rows, table_name=sup,
+                          sum_cols=[potreba_col, suma_col], total_label_col=1)
+
+        # Червоне виділення проблемних рядків — застосовується ПІСЛЯ створення таблиці,
+        # тому пряме форматування зберігає пріоритет над стилем смуг Excel-таблиці
+        highlight_rows(ws_out, len(out.columns), red_rows, color='FFCCCC')
     except Exception:
         pass
 
@@ -794,13 +830,26 @@ def make_full():
                if found[(found['Постачальник']==s) & (found['Потреба']>0)]['Маржа_%'].notna().any() else None}
               for s in ['iHerb','VitaWorld','DSN','AtletikVit'] if len(found[(found['Постачальник']==s) & (found['Потреба']>0)])]
         pd.DataFrame(rows).to_excel(w,index=False,sheet_name='Зведення')
+        try:
+            if len(rows):
+                cols = list(rows[0].keys())
+                pos_col   = cols.index('Позицій') + 1
+                od_col    = cols.index('Одиниць') + 1
+                suma_col  = cols.index(f'Сума ({cur})') + 1
+                make_excel_table(w.sheets['Зведення'], len(cols), len(rows), table_name='Зведення',
+                                  sum_cols=[pos_col, od_col, suma_col], total_label_col=1)
+        except Exception:
+            pass
 
         # Лист порівняння цін
         cmp = build_price_comparison_df()
         if len(cmp):
             cmp.to_excel(w, index=False, sheet_name='Порівняння цін')
             try:
-                add_autofilter(w.sheets['Порівняння цін'], len(cmp.columns), len(cmp)+1)
+                cmp_cols = list(cmp.columns)
+                needed_col = cmp_cols.index('Потреба') + 1
+                make_excel_table(w.sheets['Порівняння цін'], len(cmp_cols), len(cmp), table_name='Порівняння_цін',
+                                  sum_cols=[needed_col], total_label_col=1)
             except Exception:
                 pass
 
@@ -815,14 +864,16 @@ def make_full():
                           })
             low_out.to_excel(w,index=False,sheet_name='⚠️ Підняти РРЦ')
             try:
-                add_autofilter(w.sheets['⚠️ Підняти РРЦ'], len(low_out.columns), len(low_out)+1)
+                make_excel_table(w.sheets['⚠️ Підняти РРЦ'], len(low_out.columns), len(low_out),
+                                  table_name='Підняти_РРЦ', sum_cols=[], total_label_col=1)
             except Exception:
                 pass
         miss2=df[df['Постачальник']=='—'][['Артикул_IH','Назва','ABC','Продано_всього','Залишок']]
         if len(miss2):
             miss2.to_excel(w,index=False,sheet_name='Не знайдено')
             try:
-                add_autofilter(w.sheets['Не знайдено'], len(miss2.columns), len(miss2)+1)
+                make_excel_table(w.sheets['Не знайдено'], len(miss2.columns), len(miss2),
+                                  table_name='Не_знайдено', sum_cols=[], total_label_col=1)
             except Exception:
                 pass
     return buf.getvalue()
