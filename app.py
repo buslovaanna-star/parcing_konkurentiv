@@ -513,7 +513,8 @@ df['Економія'] = df.apply(lambda r: (max([v for v in [r['eff_IH'],r['eff
 
 # ── KPIs ──────────────────────────────────────────────────────────
 found = df[df['Постачальник']!='—']
-total_sum = found['Сума'].sum(); savings = found['Економія'].sum()
+to_order = found[found['Потреба'] > 0]  # тільки те, що реально потрібно замовити
+total_sum = to_order['Сума'].sum(); savings = to_order['Економія'].sum()
 low_mg = df['Підняти_РРЦ'].sum(); avg_mg = df[df['Маржа_%'].notna()]['Маржа_%'].mean()
 
 st.markdown('<div class="sh"><div class="dot" style="background:#f59e0b"></div><h3>Результати аналізу</h3></div>', unsafe_allow_html=True)
@@ -522,7 +523,7 @@ st.caption(f"Продажі: **{p_label}** · Ігноруємо рент. < **{
 
 st.markdown(f"""<div class="kpi-row">
 <div class="kpi sky"><div class="l">Сума замовлення</div><div class="v">{total_sum:,.0f}</div><div class="s">{cur}</div></div>
-<div class="kpi grn"><div class="l">Знайдено</div><div class="v">{len(found)}</div><div class="s">з {len(df)} позицій</div></div>
+<div class="kpi grn"><div class="l">До замовлення</div><div class="v">{len(to_order)}</div><div class="s">з {len(found)} знайдено · {len(df)} всього</div></div>
 <div class="kpi vio"><div class="l">Економія</div><div class="v">{savings:,.0f}</div><div class="s">{cur} vs найдорожчий</div></div>
 <div class="kpi amb"><div class="l">Середня маржа</div><div class="v">{avg_mg:.1f}%</div><div class="s">поріг {margin_min}%</div></div>
 <div class="kpi red"><div class="l">⚠️ Підняти РРЦ</div><div class="v">{int(low_mg)}</div><div class="s">маржа < {margin_min}%</div></div>
@@ -530,7 +531,7 @@ st.markdown(f"""<div class="kpi-row">
 
 sup_html = '<div class="sup-row">'
 for sup,cls,ico in [('iHerb','ih','🔵'),('VitaWorld','vw','🟢'),('DSN','dsn','🟡'),('AtletikVit','atl','🟣')]:
-    sub = found[found['Постачальник']==sup]
+    sub = to_order[to_order['Постачальник']==sup]
     if len(sub): sup_html += f'<div class="sc {cls}"><div class="sn">{ico} {sup}</div><div class="sv">{sub["Сума"].sum():,.0f} {cur}</div><div class="sd">{len(sub)} позицій · {int(sub["Потреба"].sum())} одиниць</div></div>'
 sup_html += '</div>'
 st.markdown(sup_html, unsafe_allow_html=True)
@@ -672,7 +673,7 @@ def add_autofilter(ws, n_cols, n_rows):
     ws.freeze_panes = "A2"
 
 def sup_sheet(writer, sup, data):
-    sub=data[data['Постачальник']==sup]
+    sub=data[(data['Постачальник']==sup) & (data['Потреба']>0)]
     if not len(sub): return
     out=pd.DataFrame({'Артикул (iHerb)':sub['Артикул_IH'],'Назва':sub['Назва'],'ABC':sub['ABC']})
     if sup=='VitaWorld' and 'Артикул_VW' in sub.columns: out['Артикул VW']=sub['Артикул_VW']
@@ -684,18 +685,32 @@ def sup_sheet(writer, sup, data):
     out[f'Ціна ({cur})']=sub['Ціна_закупівлі'].round(2); out[f'РРЦ ({cur})']=sub['p_RRP'].round(2)
     out['Маржа %']=sub['Маржа_%']; out['⚠️ Підняти РРЦ']=sub['Підняти_РРЦ']
     out[f'Сума ({cur})']=sub['Сума'].round(2)
+    n_data_rows = len(out)
+    # Підсумковий рядок: сума потреби та сума замовлення
+    total_row = {c: '' for c in out.columns}
+    total_row['Артикул (iHerb)'] = 'ПІДСУМОК'
+    total_row['Потреба (шт.)'] = int(out['Потреба (шт.)'].sum())
+    total_row[f'Сума ({cur})'] = round(out[f'Сума ({cur})'].sum(), 2)
+    out = pd.concat([out, pd.DataFrame([total_row])], ignore_index=True)
     out.to_excel(writer, index=False, sheet_name=sup)
-    # Червона підсвітка рядків де треба підняти РРЦ
+    # Червона підсвітка рядків де треба підняти РРЦ + виділення підсумкового рядка
     try:
-        from openpyxl.styles import PatternFill
+        from openpyxl.styles import PatternFill, Font
         ws_out = writer.sheets[sup]
         red_fill = PatternFill('solid', start_color='FFCCCC', fgColor='FFCCCC')
+        bold_fill = PatternFill('solid', start_color='E8E8E8', fgColor='E8E8E8')
         raise_rrp = sub['Підняти_РРЦ'].values
         for row_i, is_low in enumerate(raise_rrp, start=2):
             if is_low:
                 for col_i in range(1, len(out.columns)+1):
                     ws_out.cell(row=row_i, column=col_i).fill = red_fill
-        add_autofilter(ws_out, len(out.columns), len(out)+1)
+        # Підсумковий рядок жирним і сірим фоном
+        total_row_idx = n_data_rows + 2  # +2: 1 за заголовок, 1 за 1-індексацію Excel
+        for col_i in range(1, len(out.columns)+1):
+            c = ws_out.cell(row=total_row_idx, column=col_i)
+            c.fill = bold_fill
+            c.font = Font(bold=True)
+        add_autofilter(ws_out, len(out.columns), n_data_rows+1)
     except Exception:
         pass
 
@@ -735,12 +750,13 @@ def build_price_comparison_df():
 def make_full():
     buf=io.BytesIO()
     with pd.ExcelWriter(buf,engine='openpyxl') as w:
-        rows=[{'Постачальник':s,'Позицій':len(found[found['Постачальник']==s]),
-               'Одиниць':int(found[found['Постачальник']==s]['Потреба'].sum()),
-               f'Сума ({cur})':round(found[found['Постачальник']==s]['Сума'].sum(),2),
-               'Серед. маржа %':round(found[found['Постачальник']==s]['Маржа_%'].mean(),1)
-               if found[found['Постачальник']==s]['Маржа_%'].notna().any() else None}
-              for s in ['iHerb','VitaWorld','DSN','AtletikVit'] if len(found[found['Постачальник']==s])]
+        rows=[{'Постачальник':s,
+               'Позицій':len(found[(found['Постачальник']==s) & (found['Потреба']>0)]),
+               'Одиниць':int(found[(found['Постачальник']==s) & (found['Потреба']>0)]['Потреба'].sum()),
+               f'Сума ({cur})':round(found[(found['Постачальник']==s) & (found['Потреба']>0)]['Сума'].sum(),2),
+               'Серед. маржа %':round(found[(found['Постачальник']==s) & (found['Потреба']>0)]['Маржа_%'].mean(),1)
+               if found[(found['Постачальник']==s) & (found['Потреба']>0)]['Маржа_%'].notna().any() else None}
+              for s in ['iHerb','VitaWorld','DSN','AtletikVit'] if len(found[(found['Постачальник']==s) & (found['Потреба']>0)])]
         pd.DataFrame(rows).to_excel(w,index=False,sheet_name='Зведення')
 
         # Лист порівняння цін
