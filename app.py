@@ -65,6 +65,16 @@ with st.sidebar:
     min_rent      = st.slider("Ігнорувати продажі з рентабельністю нижче %", 0, 60, 30, 5,
                               help="Акційні продажі не враховуються в потребі")
     st.divider()
+    st.markdown("**⚡ Низька статистика наявності (сайт)**")
+    low_stats_threshold = st.slider(
+        "Поріг (% часу в наявності)", 0, 50, 20, 5,
+        help="Якщо товар був на складі менше цього % часу за весь обраний період — "
+             "середньоденне продажів вважається ненадійним (мало даних)")
+    exclude_low_stats = st.checkbox(
+        "Виключити такі товари з автоматичного розрахунку потреби", value=False,
+        help="Якщо увімкнено — потреба для позначених ⚡ товарів обрізається до 0; "
+             "рішення про замовлення приймається вручну")
+    st.divider()
     st.markdown("**💰 Маржинальність**")
     margin_min = st.slider("Мінімальна маржа закупівлі %", 0, 80, 25, 5)
     only_avail = st.checkbox("Тільки товари в наявності", True)
@@ -283,8 +293,18 @@ with st.spinner("Обробка файлів..."):
         excluded_anomaly = sales_site.loc[anomaly_mask, ['Артикул_IH','Назва','Продано_всього']].copy()
         sales_site = sales_site[~anomaly_mask].copy()
 
+        # ⚡ НИЗЬКА СТАТИСТИКА: товар був у наявності менше X% часу за весь обраний період —
+        # середньоденне продажів ненадійне (мало даних), напр. товар привезли під замовлення
+        # на кілька днів, він швидко продався — це не означає стабільний високий попит
+        calendar_days_total = sales_site['Місяців'] * 30
+        sales_site['Низька_статистика'] = (
+            sales_site['Днів_наявності'] < (low_stats_threshold / 100.0) * calendar_days_total
+        )
+
         sales_site['Середньодень'] = sales_site['Продано_всього'] / sales_site['Днів_наявності']
         sales_site = sales_site.drop(columns=['Днів_наявності'])
+    else:
+        sales_site['Низька_статистика'] = False
 
     # Магазини (теж з кешем)
     store_bytes = f_stores.getvalue()
@@ -293,11 +313,13 @@ with st.spinner("Обробка файлів..."):
     sales_store = parse_sales(df_store_s, step=7, data_row=13, min_rent_pct=min_rent, n_months=recent_months)
     stock_store = parse_stock(df_store_z, data_row=2)
     # Для магазинів немає даних про фактичні дні наявності — лишаємо календарний розрахунок (n_m*30)
+    sales_store['Низька_статистика'] = False
 
     # Зводимо
     df_sales = pd.concat([sales_site, sales_store], ignore_index=True).groupby('Артикул_IH').agg(
         Назва=('Назва','first'), Продано_всього=('Продано_всього','sum'),
-        Місяців=('Місяців','max'), Середньодень=('Середньодень','sum')).reset_index()
+        Місяців=('Місяців','max'), Середньодень=('Середньодень','sum'),
+        Низька_статистика=('Низька_статистика','any')).reset_index()
     df_stock = pd.concat([stock_site, stock_store], ignore_index=True
                          ).groupby('Артикул_IH').agg(
         Залишок=('Залишок','sum'), В_дорозі=('В_дорозі','sum')).reset_index()
@@ -433,6 +455,12 @@ df = df_sales.merge(df_stock, on='Артикул_IH', how='left')
 df['Залишок']  = df['Залишок'].fillna(0)
 df['В_дорозі'] = df['В_дорозі'].fillna(0) if 'В_дорозі' in df.columns else 0
 df['Потреба'] = ((df['Середньодень'] * total_days) - df['Залишок']).clip(lower=0).round().astype(int)
+if 'Низька_статистика' not in df.columns:
+    df['Низька_статистика'] = False
+df['Низька_статистика'] = df['Низька_статистика'].fillna(False)
+if exclude_low_stats:
+    # За запитом — товари з ненадійним середньоденним (мало часу в наявності) не замовляємо автоматично
+    df.loc[df['Низька_статистика'], 'Потреба'] = 0
 
 # ABC
 total_s = df['Продано_всього'].sum()
@@ -516,10 +544,15 @@ found = df[df['Постачальник']!='—']
 to_order = found[found['Потреба'] > 0]  # тільки те, що реально потрібно замовити
 total_sum = to_order['Сума'].sum(); savings = to_order['Економія'].sum()
 low_mg = df['Підняти_РРЦ'].sum(); avg_mg = df[df['Маржа_%'].notna()]['Маржа_%'].mean()
+n_low_stats = int(df['Низька_статистика'].sum())
 
 st.markdown('<div class="sh"><div class="dot" style="background:#f59e0b"></div><h3>Результати аналізу</h3></div>', unsafe_allow_html=True)
 p_label = f"останні {recent_months} міс." if recent_months else "весь період"
 st.caption(f"Продажі: **{p_label}** · Ігноруємо рент. < **{min_rent}%** · Покриття: **{total_days} дн.** (горизонт {horizon} + lead {lead_time} + запас {safety})")
+if n_low_stats > 0:
+    exclude_note = "потреба для них обрізана до 0" if exclude_low_stats else "враховані в розрахунку як зазвичай"
+    st.info(f"⚡ **{n_low_stats}** артикулів сайту були в наявності менше **{low_stats_threshold}%** часу за обраний "
+            f"період — середньоденне продажів для них може бути ненадійним (мало даних), {exclude_note}.")
 
 st.markdown(f"""<div class="kpi-row">
 <div class="kpi sky"><div class="l">Сума замовлення</div><div class="v">{total_sum:,.0f}</div><div class="s">{cur}</div></div>
@@ -540,6 +573,7 @@ st.markdown(sup_html, unsafe_allow_html=True)
 def build_tbl(data):
     t=pd.DataFrame()
     t['Артикул']=data['Артикул_IH']; t['Назва']=data['Назва']; t['ABC']=data['ABC']
+    t['⚡ Мало даних']=data['Низька_статистика'] if 'Низька_статистика' in data.columns else False
     t['Залишок']=data['Залишок'].astype(int)
     t['🚚 В дорозі']=data['В_дорозі'].astype(int) if 'В_дорозі' in data.columns else 0
     t['Потреба']=data['Потреба']
@@ -554,6 +588,7 @@ def build_tbl(data):
 
 cfg={'Назва':st.column_config.TextColumn(width='large'),'ABC':st.column_config.TextColumn(width='small'),
      '🚚 В дорозі':st.column_config.NumberColumn(width='small'),
+     '⚡ Мало даних':st.column_config.CheckboxColumn(width='small'),
      '⚠️ РРЦ':st.column_config.CheckboxColumn(width='small'),'≈ Рівні':st.column_config.CheckboxColumn(width='small'),
      **{f'{k} ({cur})':st.column_config.NumberColumn(format='%.2f') for k in ['Ціна','РРЦ','Сума','iHerb','VW','DSN','ATL']},
      **{f'Маржа{k}':st.column_config.NumberColumn(format='%.1f %%') for k in [' %',' iH %',' VW %',' DSN %',' ATL %']},
@@ -681,6 +716,7 @@ def sup_sheet(writer, sup, data):
     if sup=='AtletikVit' and 'Артикул_ATL' in sub.columns: out['Артикул ATL']=sub['Артикул_ATL']
     out['Залишок']=sub['Залишок'].astype(int)
     out['🚚 В дорозі']=sub['В_дорозі'].astype(int) if 'В_дорозі' in sub.columns else 0
+    out['⚡ Мало даних']=sub['Низька_статистика'] if 'Низька_статистика' in sub.columns else False
     out['Потреба (шт.)']=sub['Потреба']
     out[f'Ціна ({cur})']=sub['Ціна_закупівлі'].round(2); out[f'РРЦ ({cur})']=sub['p_RRP'].round(2)
     out['Маржа %']=sub['Маржа_%']; out['⚠️ Підняти РРЦ']=sub['Підняти_РРЦ']
