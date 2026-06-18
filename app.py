@@ -88,6 +88,25 @@ def read_f(f):
     eng = 'xlrd' if f.name.endswith('.xls') else 'openpyxl'
     return pd.read_excel(f, engine=eng)
 
+@st.cache_data(show_spinner=False)
+def cached_read_f(file_bytes, file_name):
+    """Кешована версія read_f — уникає повторного парсингу Excel/CSV при ререндері."""
+    if file_name.endswith('.csv'):
+        return pd.read_csv(io.BytesIO(file_bytes))
+    eng = 'xlrd' if file_name.endswith('.xls') else 'openpyxl'
+    return pd.read_excel(io.BytesIO(file_bytes), engine=eng)
+
+@st.cache_data(show_spinner=False)
+def cached_read_excel_sheet(file_bytes, sheet_name, header, engine=None):
+    """Кешує читання конкретного листа Excel-файлу за хешем його байтів.
+    При повторному рендері Streamlit (зміна слайдера тощо) той самий файл
+    не перечитується з диска — береться готовий DataFrame з кешу."""
+    return pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet_name, header=header, engine=engine)
+
+@st.cache_data(show_spinner=False)
+def cached_excel_sheet_names(file_bytes):
+    return pd.ExcelFile(io.BytesIO(file_bytes)).sheet_names
+
 def find_col(df, kws):
     for c in df.columns:
         if any(k in str(c).lower() for k in kws): return c
@@ -105,22 +124,28 @@ SKIP_NAMES = {'доставка','нова пошта','новая почта','
 def parse_sales(df_raw, step, data_row, min_rent_pct, n_months=None):
     qty_off  = 4 if step==7 else 2
     rent_off = 5 if step==7 else 3
+    arr = df_raw.values  # numpy масив — набагато швидше за .iloc у циклі
     months = []
-    for c in range(0, df_raw.shape[1], step):
-        val = cs(df_raw.iloc[1, c])
+    for c in range(0, arr.shape[1], step):
+        val = cs(arr[1, c])
         m = re.sub(r'Період[:\s]*', '', val).replace('р.','').strip()
         if m: months.append((c, m))
     if n_months: months = months[-n_months:]
+    data_block = arr[data_row:, :]  # відрізаємо службові рядки одним зрізом
     records = {}
     for col_s, mname in months:
-        for ri in range(data_row, df_raw.shape[0]):
-            name = cs(df_raw.iloc[ri, col_s])
-            art  = cs(df_raw.iloc[ri, col_s+1])
+        names = data_block[:, col_s]
+        arts  = data_block[:, col_s+1]
+        qtys  = data_block[:, col_s+qty_off]
+        rents = data_block[:, col_s+rent_off]
+        for name_raw, art_raw, qty_raw, rent_raw in zip(names, arts, qtys, rents):
+            art = cs(art_raw)
             if not art or art in SKIP_ARTS: continue
+            name = cs(name_raw)
             if name.lower() in SKIP_NAMES: continue
-            qty  = to_num(df_raw.iloc[ri, col_s+qty_off])
-            rent = to_num(df_raw.iloc[ri, col_s+rent_off])
+            qty = to_num(qty_raw)
             if qty <= 0: continue
+            rent = to_num(rent_raw)
             if rent > 0 and rent < min_rent_pct: continue
             if art not in records: records[art] = {'Назва': name, 'міс': {}}
             records[art]['міс'][mname] = records[art]['міс'].get(mname, 0) + qty
@@ -143,36 +168,40 @@ def parse_availability_days(df_raw, n_months=None):
     середньоденних продажів замість ділення на календарні 30 днів/місяць.
     """
     step = 4
+    arr = df_raw.values
     months = []
-    for c in range(0, df_raw.shape[1], step):
-        val = cs(df_raw.iloc[1, c])
+    for c in range(0, arr.shape[1], step):
+        val = cs(arr[1, c])
         m = re.sub(r'Період[:\s]*', '', val).replace('р.','').strip()
         if m: months.append(c)
     if n_months: months = months[-n_months:]
+    data_block = arr[4:, :]
     days_sum = {}
     for col_s in months:
-        for ri in range(4, df_raw.shape[0]):
-            art = cs(df_raw.iloc[ri, col_s])
+        arts = data_block[:, col_s]
+        days_col = data_block[:, col_s+2]
+        for art_raw, days_raw in zip(arts, days_col):
+            art = cs(art_raw)
             if not art or art in SKIP_ARTS: continue
-            days = to_num(df_raw.iloc[ri, col_s+2])
-            days_sum[art] = days_sum.get(art, 0) + days
+            days_sum[art] = days_sum.get(art, 0) + to_num(days_raw)
     if not days_sum:
         return pd.DataFrame(columns=['Артикул_IH','Днів_наявності'])
     return pd.DataFrame([{'Артикул_IH':a, 'Днів_наявності':d} for a,d in days_sum.items()])
 
 def parse_stock(df_raw, data_row):
+    arr = df_raw.values
+    data_block = arr[data_row:, :]
+    has_transit_col = arr.shape[1] > 3
     rows = []
-    for i in range(data_row, len(df_raw)):
-        art = cs(df_raw.iloc[i, 1])
-        qty = df_raw.iloc[i, 2]
+    for r in data_block:
+        art = cs(r[1])
         if not art or art in SKIP_ARTS: continue
-        q = max(to_num(qty), 0)
-        # Колонка 3 = "Замовлено у постачальників" (товар в дорозі)
-        in_transit = to_num(df_raw.iloc[i, 3]) if df_raw.shape[1] > 3 else 0
-        in_transit = max(in_transit, 0)
+        q = max(to_num(r[2]), 0)
+        in_transit = max(to_num(r[3]), 0) if has_transit_col else 0
         rows.append({'Артикул_IH': art, 'Залишок': q, 'В_дорозі': in_transit})
     if not rows: return pd.DataFrame(columns=['Артикул_IH','Залишок','В_дорозі'])
     return pd.DataFrame(rows).groupby('Артикул_IH').agg(
+
         Залишок=('Залишок','sum'), В_дорозі=('В_дорозі','sum')).reset_index()
 
 def extract_bc(x):
@@ -229,17 +258,18 @@ if optional_missing:
 with st.spinner("Обробка файлів..."):
     bc_map = load_barcodes()
 
-    # Сайт
-    df_site_s = pd.read_excel(f_site, sheet_name='продажі дані', header=None)
-    df_site_z = pd.read_excel(f_site, sheet_name='наявність на складі', header=None)
+    # Сайт (читання з кешем — повторний рендер не перечитує файл з диска)
+    site_bytes = f_site.getvalue()
+    df_site_s = cached_read_excel_sheet(site_bytes, 'продажі дані', None)
+    df_site_z = cached_read_excel_sheet(site_bytes, 'наявність на складі', None)
     sales_site  = parse_sales(df_site_s, step=5, data_row=13, min_rent_pct=min_rent, n_months=recent_months)
     stock_site  = parse_stock(df_site_z, data_row=3)
 
     # Коригуємо середньоденні продажі сайту на фактичну к-сть днів наявності
     # (замість поділу на календарні 30 днів/місяць) — лист 'Залишки'
     excluded_anomaly = pd.DataFrame(columns=['Артикул_IH','Назва','Продано_всього'])
-    if 'Залишки' in pd.ExcelFile(f_site).sheet_names:
-        df_site_days = pd.read_excel(f_site, sheet_name='Залишки', header=None)
+    if 'Залишки' in cached_excel_sheet_names(site_bytes):
+        df_site_days = cached_read_excel_sheet(site_bytes, 'Залишки', None)
         avail_days_site = parse_availability_days(df_site_days, n_months=recent_months)
         sales_site = sales_site.merge(avail_days_site, on='Артикул_IH', how='left')
         # Якщо немає даних про дні наявності взагалі (артикул не зустрічався в Залишках) —
@@ -256,9 +286,10 @@ with st.spinner("Обробка файлів..."):
         sales_site['Середньодень'] = sales_site['Продано_всього'] / sales_site['Днів_наявності']
         sales_site = sales_site.drop(columns=['Днів_наявності'])
 
-    # Магазини
-    df_store_s = pd.read_excel(f_stores, sheet_name='продажі магазини', header=None)
-    df_store_z = pd.read_excel(f_stores, sheet_name='наявність на магазинах', header=None)
+    # Магазини (теж з кешем)
+    store_bytes = f_stores.getvalue()
+    df_store_s = cached_read_excel_sheet(store_bytes, 'продажі магазини', None)
+    df_store_z = cached_read_excel_sheet(store_bytes, 'наявність на магазинах', None)
     sales_store = parse_sales(df_store_s, step=7, data_row=13, min_rent_pct=min_rent, n_months=recent_months)
     stock_store = parse_stock(df_store_z, data_row=2)
     # Для магазинів немає даних про фактичні дні наявності — лишаємо календарний розрахунок (n_m*30)
@@ -274,7 +305,7 @@ with st.spinner("Обробка файлів..."):
     # РРЦ
     # РРЦ — новий формат файлу: sku / price_before_coefficient (USD), без дублікатів і дат
     if f_rrp is not None:
-        raw_rrp = read_f(f_rrp); raw_rrp.columns = raw_rrp.columns.str.strip()
+        raw_rrp = cached_read_f(f_rrp.getvalue(), f_rrp.name); raw_rrp.columns = raw_rrp.columns.str.strip()
         ar = find_col(raw_rrp, ['sku','артикул'])
         pr = find_col(raw_rrp, ['price_before_coefficient'])
         if not pr:  # запасний варіант якщо колонку перейменують/файл іншого типу
@@ -301,7 +332,7 @@ with st.spinner("Обробка файлів..."):
 
     # iHerb прайс
     if f_ih is not None:
-        raw_ih = read_f(f_ih); raw_ih.columns = raw_ih.columns.str.strip()
+        raw_ih = cached_read_f(f_ih.getvalue(), f_ih.name); raw_ih.columns = raw_ih.columns.str.strip()
         a_ih = find_col(raw_ih,['артикул','sku','article']); p_ih = find_col(raw_ih,['ціна','цена','price']); v_ih = find_col(raw_ih,['наявн','налич','availab'])
         df_ih_p = raw_ih[[a_ih,p_ih]].copy(); df_ih_p.columns = ['Артикул_IH','Ціна_IH_USD']
         df_ih_p['Наявність_IH'] = raw_ih[v_ih].values if v_ih else 'Є в наявності'
@@ -322,7 +353,7 @@ with st.spinner("Обробка файлів..."):
     # VitaWorld
     if f_vw is not None:
         try:
-            raw_vw = pd.read_excel(f_vw, header=None, engine='xlrd' if f_vw.name.endswith('.xls') else 'openpyxl')
+            raw_vw = cached_read_excel_sheet(f_vw.getvalue(), 0, None, engine='xlrd' if f_vw.name.endswith('.xls') else 'openpyxl')
             vw_rows = []
             for _, row in raw_vw.iterrows():
                 art = row[2]
@@ -349,7 +380,7 @@ with st.spinner("Обробка файлів..."):
 
     # DSN
     if f_dsn is not None:
-        raw_dsn = read_f(f_dsn); raw_dsn.columns = raw_dsn.columns.str.strip()
+        raw_dsn = cached_read_f(f_dsn.getvalue(), f_dsn.name); raw_dsn.columns = raw_dsn.columns.str.strip()
         a_dsn = find_col(raw_dsn,['артикул']); p_dsn = find_col(raw_dsn,['цена','ціна','price'])
         av_dsn = find_col(raw_dsn,['наличие','наявн']); desc_c = find_col(raw_dsn,['описание товара (ua)','опис товара'])
         df_dsn_p = raw_dsn[[a_dsn,p_dsn]].copy(); df_dsn_p.columns = ['Артикул_DSN','Ціна_DSN_UAH']
@@ -366,10 +397,10 @@ with st.spinner("Обробка файлів..."):
     # AtletikVit (заголовки таблиці на 2-му рядку файлу — header=1)
     if f_atl is not None:
         if f_atl.name.endswith('.csv'):
-            raw_atl = pd.read_csv(f_atl, header=1)
+            raw_atl = pd.read_csv(io.BytesIO(f_atl.getvalue()), header=1)
         else:
             eng = 'xlrd' if f_atl.name.endswith('.xls') else 'openpyxl'
-            raw_atl = pd.read_excel(f_atl, header=1, engine=eng)
+            raw_atl = pd.read_excel(io.BytesIO(f_atl.getvalue()), header=1, engine=eng)
         raw_atl.columns = raw_atl.columns.astype(str).str.strip()
         a_atl  = find_col(raw_atl, ['артикул'])
         p_atl  = find_col(raw_atl, ['ціна зі знижкою','цена со скидкой','discount'])
