@@ -135,6 +135,31 @@ def parse_sales(df_raw, step, data_row, min_rent_pct, n_months=None):
                      'Середньодень': total/(n_m*30) if n_m>0 else 0})
     return pd.DataFrame(rows)
 
+def parse_availability_days(df_raw, n_months=None):
+    """
+    Парсить вкладку 'Залишки' сайту: крок 4 колонки (Артикул/Номенклатура/Днів/NaN),
+    дані з рядка 4. Повертає суму фактичних днів наявності по кожному артикулу
+    за обраний період (весь / останні N місяців) — для точного розрахунку
+    середньоденних продажів замість ділення на календарні 30 днів/місяць.
+    """
+    step = 4
+    months = []
+    for c in range(0, df_raw.shape[1], step):
+        val = cs(df_raw.iloc[1, c])
+        m = re.sub(r'Період[:\s]*', '', val).replace('р.','').strip()
+        if m: months.append(c)
+    if n_months: months = months[-n_months:]
+    days_sum = {}
+    for col_s in months:
+        for ri in range(4, df_raw.shape[0]):
+            art = cs(df_raw.iloc[ri, col_s])
+            if not art or art in SKIP_ARTS: continue
+            days = to_num(df_raw.iloc[ri, col_s+2])
+            days_sum[art] = days_sum.get(art, 0) + days
+    if not days_sum:
+        return pd.DataFrame(columns=['Артикул_IH','Днів_наявності'])
+    return pd.DataFrame([{'Артикул_IH':a, 'Днів_наявності':d} for a,d in days_sum.items()])
+
 def parse_stock(df_raw, data_row):
     rows = []
     for i in range(data_row, len(df_raw)):
@@ -210,11 +235,33 @@ with st.spinner("Обробка файлів..."):
     sales_site  = parse_sales(df_site_s, step=5, data_row=13, min_rent_pct=min_rent, n_months=recent_months)
     stock_site  = parse_stock(df_site_z, data_row=3)
 
+    # Коригуємо середньоденні продажі сайту на фактичну к-сть днів наявності
+    # (замість поділу на календарні 30 днів/місяць) — лист 'Залишки'
+    excluded_anomaly = pd.DataFrame(columns=['Артикул_IH','Назва','Продано_всього'])
+    if 'Залишки' in pd.ExcelFile(f_site).sheet_names:
+        df_site_days = pd.read_excel(f_site, sheet_name='Залишки', header=None)
+        avail_days_site = parse_availability_days(df_site_days, n_months=recent_months)
+        sales_site = sales_site.merge(avail_days_site, on='Артикул_IH', how='left')
+        # Якщо немає даних про дні наявності взагалі (артикул не зустрічався в Залишках) —
+        # рахуємо по-старому (календарних 30 днів/місяць), бо це не аномалія, а просто відсутність рядка
+        no_data_mask = sales_site['Днів_наявності'].isna()
+        sales_site.loc[no_data_mask, 'Днів_наявності'] = sales_site.loc[no_data_mask, 'Місяців'] * 30
+
+        # АНОМАЛІЯ: дні наявності = 0, але продажі > 0 (суперечливі дані 1С) — виключаємо з розрахунку,
+        # показуємо окремо для ручної перевірки замість підстановки нереалістичного середньоденного
+        anomaly_mask = (sales_site['Днів_наявності'] <= 0) & (sales_site['Продано_всього'] > 0)
+        excluded_anomaly = sales_site.loc[anomaly_mask, ['Артикул_IH','Назва','Продано_всього']].copy()
+        sales_site = sales_site[~anomaly_mask].copy()
+
+        sales_site['Середньодень'] = sales_site['Продано_всього'] / sales_site['Днів_наявності']
+        sales_site = sales_site.drop(columns=['Днів_наявності'])
+
     # Магазини
     df_store_s = pd.read_excel(f_stores, sheet_name='продажі магазини', header=None)
     df_store_z = pd.read_excel(f_stores, sheet_name='наявність на магазинах', header=None)
     sales_store = parse_sales(df_store_s, step=7, data_row=13, min_rent_pct=min_rent, n_months=recent_months)
     stock_store = parse_stock(df_store_z, data_row=2)
+    # Для магазинів немає даних про фактичні дні наявності — лишаємо календарний розрахунок (n_m*30)
 
     # Зводимо
     df_sales = pd.concat([sales_site, sales_store], ignore_index=True).groupby('Артикул_IH').agg(
@@ -498,9 +545,10 @@ def show_tab(subset, sup=None, key_prefix='all'):
                  column_config=cfg)
     st.markdown(f"**{subset['Сума'].sum():,.2f} {cur}** · {len(subset)} позицій · {int(subset['Потреба'].sum())} одиниць")
 
-n_low=int(df['Підняти_РРЦ'].sum()); n_miss=int((df['Постачальник']=='—').sum())
+n_low=int(df['Підняти_РРЦ'].sum()); n_miss=int((df['Постачальник']=='—').sum()); n_anom=len(excluded_anomaly)
 tabs=st.tabs(["📋 Всі","🔵 iHerb","🟢 VitaWorld","🟡 DSN","🟣 AtletikVit",
-              "💹 Порівняння цін",f"⚠️ Підняти РРЦ ({n_low})",f"❌ Не знайдено ({n_miss})"])
+              "💹 Порівняння цін",f"⚠️ Підняти РРЦ ({n_low})",f"❌ Не знайдено ({n_miss})",
+              f"🔍 Дані з аномалією ({n_anom})"])
 with tabs[0]: show_tab(found, key_prefix='all')
 with tabs[1]: show_tab(found,'iHerb', key_prefix='ih')
 with tabs[2]: show_tab(found,'VitaWorld', key_prefix='vw')
@@ -571,6 +619,15 @@ with tabs[7]:
     miss=df[df['Постачальник']=='—'][['Артикул_IH','Назва','ABC','Продано_всього','Залишок']]
     miss.columns=['Артикул','Назва','ABC','Продано','Залишок']
     st.dataframe(miss, use_container_width=True, hide_index=True)
+with tabs[8]:
+    st.caption("Сайт: товари з продажами, але 0 днів наявності за звітом 1С 'Залишки' за обраний період "
+               "— суперечливі дані, тому виключені з автоматичного розрахунку потреби. Перевірте вручну.")
+    if len(excluded_anomaly):
+        anom_show = excluded_anomaly.rename(columns={'Продано_всього':'Продано (од.)'})
+        st.dataframe(anom_show, use_container_width=True, hide_index=True)
+        st.warning(f"⚠️ {len(excluded_anomaly)} артикулів сайту виключено з розрахунку потреби через аномалію в даних.")
+    else:
+        st.success("✅ Аномалій не знайдено — усі дані узгоджені.")
 
 # ── Export ────────────────────────────────────────────────────────
 st.markdown('<div class="sh"><div class="dot" style="background:#22c55e"></div><h3>Експорт замовлень</h3></div>', unsafe_allow_html=True)
