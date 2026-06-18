@@ -715,12 +715,18 @@ def make_excel_table(ws, n_cols, n_data_rows, table_name, sum_cols=None, total_l
     from openpyxl.utils import get_column_letter
     from openpyxl.worksheet.table import Table, TableStyleInfo
     import re as _re
+    import hashlib
 
     total_row_idx = n_data_rows + 2  # 1 за заголовок + 1 за 1-індексацію
     last_col = get_column_letter(n_cols)
     ref = f"A1:{last_col}{total_row_idx}"
 
-    safe_name = "Tbl_" + _re.sub(r'[^A-Za-z0-9_]', '_', table_name)
+    # Excel вимагає УНІКАЛЬНІ імена таблиць (латиниця/цифри/підкреслення) у межах книги.
+    # Просте видалення кирилиці може дати колізії (різні назви -> однакові підкреслення),
+    # що пошкоджує файл. Додаємо короткий хеш від оригінальної назви для гарантії унікальності.
+    stripped = _re.sub(r'[^A-Za-z0-9_]', '_', table_name).strip('_') or 'Sheet'
+    name_hash = hashlib.md5(table_name.encode('utf-8')).hexdigest()[:6]
+    safe_name = f"Tbl_{stripped}_{name_hash}"[:60]  # Excel обмежує довжину імені таблиці
 
     ws.cell(row=total_row_idx, column=total_label_col, value="Підсумок")
     sum_cols = sum_cols or []
@@ -751,6 +757,17 @@ def highlight_rows(ws, n_cols, row_indices, color='FFCCCC'):
     for row_i in row_indices:
         for col_i in range(1, n_cols+1):
             ws.cell(row=row_i, column=col_i).fill = fill
+
+def color_rows_by_value(ws, col_idx, values, color_map):
+    """Заливає тільки одну колонку (col_idx, 1-based) кольором залежно від значення
+    в кожному рядку — напр. ім'я постачальника. values — масив значень у порядку рядків
+    даних (без заголовка). color_map — словник {значення: hex-колір без #}."""
+    from openpyxl.styles import PatternFill
+    fills = {val: PatternFill('solid', start_color=c, fgColor=c) for val, c in color_map.items()}
+    for offset, val in enumerate(values):
+        if val in fills:
+            row_i = offset + 2  # +2: заголовок + 1-індексація
+            ws.cell(row=row_i, column=col_idx).fill = fills[val]
 
 def sup_sheet(writer, sup, data):
     sub=data[(data['Постачальник']==sup) & (data['Потреба']>0)]
@@ -850,6 +867,17 @@ def make_full():
                 needed_col = cmp_cols.index('Потреба') + 1
                 make_excel_table(w.sheets['Порівняння цін'], len(cmp_cols), len(cmp), table_name='Порівняння_цін',
                                   sum_cols=[needed_col], total_label_col=1)
+                # Кольорове маркування колонки "Найкраща ціна у" — той самий колір
+                # для кожного постачальника, що й картки/іконки в інтерфейсі
+                best_col_idx = cmp_cols.index('Найкраща ціна у') + 1
+                supplier_colors = {
+                    'iHerb': 'D6E9F8',       # 🔵 синій
+                    'VitaWorld': 'D9F2D9',   # 🟢 зелений
+                    'DSN': 'FCEFD0',         # 🟡 жовтий
+                    'AtletikVit': 'E8D9F5',  # 🟣 фіолетовий
+                }
+                color_rows_by_value(w.sheets['Порівняння цін'], best_col_idx,
+                                     cmp['Найкраща ціна у'].values, supplier_colors)
             except Exception:
                 pass
 
